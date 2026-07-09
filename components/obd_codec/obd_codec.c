@@ -1,5 +1,4 @@
 #include "obd_codec.h"
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +14,7 @@ static int hex_nibble(char c)
 /* Extract contiguous hex bytes from ELM text into out[]; returns byte count */
 static int extract_hex_bytes(const char *in, uint8_t *out, int max_out)
 {
+    if (!in || !out || max_out <= 0) return 0;
     int n = 0;
     int hi = -1;
     for (const char *p = in; *p && n < max_out; ++p) {
@@ -92,6 +92,7 @@ bool obd_codec_decode_mode01(const char *response, uint8_t pid, obd_decoded_t *o
 
 int obd_codec_parse_dtcs(const char *response, char out[][6], int max_out)
 {
+    if (!response || !out || max_out <= 0) return 0;
     uint8_t bytes[64];
     int n = extract_hex_bytes(response, bytes, 64);
     int count = 0;
