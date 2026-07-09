@@ -1,0 +1,23 @@
+menu "ELM327 Bridge"
+
+    config ELM_SOFTAP_SSID
+        string "SoftAP SSID"
+        default "ELM327-C6"
+
+    config ELM_SOFTAP_PASS
+        string "SoftAP password"
+        default "elm327c6"
+        help
+            Minimum 8 characters.
+
+    config ELM_CMD_TIMEOUT_MS
+        int "ELM command timeout (ms)"
+        default 3000
+        range 500 30000
+
+    config ELM_BLE_SCAN_MS
+        int "BLE scan duration (ms)"
+        default 5000
+        range 1000 30000
+
+endmenu
