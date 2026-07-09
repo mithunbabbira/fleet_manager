@@ -1,5 +1,6 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "profile_store.h"
 #include "sys_runtime.h"
 
 static const char *TAG = "app";
@@ -16,4 +17,10 @@ void app_main(void)
 
     ESP_ERROR_CHECK(sys_runtime_init());
     ESP_LOGI(TAG, "sys_runtime ready");
+
+    ESP_ERROR_CHECK(profile_store_init());
+    obd_profile_t active;
+    if (profile_store_get_active(&active) == ESP_OK) {
+        ESP_LOGI(TAG, "active profile: %s (%d items)", active.name, active.item_count);
+    }
 }
