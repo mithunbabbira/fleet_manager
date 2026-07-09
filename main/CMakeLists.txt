@@ -1,3 +1,4 @@
 idf_component_register(SRCS "app_main.c"
                     INCLUDE_DIRS "."
-                    REQUIRES nvs_flash sys_runtime profile_store)
+                    REQUIRES nvs_flash sys_runtime profile_store telemetry_bus ble_elm elm327_client
+                             obd_poller transport_serial transport_http)
