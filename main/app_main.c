@@ -1,5 +1,6 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "sys_runtime.h"
 
 static const char *TAG = "app";
 
@@ -12,4 +13,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     ESP_LOGI(TAG, "ELM327 ESP32-C6 bridge boot");
+
+    ESP_ERROR_CHECK(sys_runtime_init());
+    ESP_LOGI(TAG, "sys_runtime ready");
 }
