@@ -29,14 +29,19 @@ static cJSON *add_sample(cJSON *samples, const char *key, const char *cmd,
     if (!item) {
         return NULL;
     }
-    cJSON_AddStringToObject(item, "k", key);
-    cJSON_AddStringToObject(item, "cmd", cmd);
-    cJSON_AddNumberToObject(item, "v", value);
-    cJSON_AddStringToObject(item, "u", unit);
-    cJSON_AddStringToObject(item, "raw", raw);
-    cJSON_AddBoolToObject(item, "ok", true);
-    cJSON_AddNumberToObject(item, "age_ms", 0);
-    cJSON_AddItemToArray(samples, item);
+
+    if (!cJSON_AddStringToObject(item, "k", key) ||
+        !cJSON_AddStringToObject(item, "cmd", cmd) ||
+        !cJSON_AddNumberToObject(item, "v", value) ||
+        !cJSON_AddStringToObject(item, "u", unit) ||
+        !cJSON_AddStringToObject(item, "raw", raw) ||
+        !cJSON_AddBoolToObject(item, "ok", true) ||
+        !cJSON_AddNumberToObject(item, "age_ms", 0) ||
+        !cJSON_AddItemToArray(samples, item)) {
+        cJSON_Delete(item);
+        return NULL;
+    }
+
     return item;
 }
 
@@ -46,46 +51,61 @@ static char *build_snapshot_json(const synthetic_snapshot_t *s, uint32_t cmds_ok
     cJSON *link = cJSON_CreateObject();
     cJSON *metrics = cJSON_CreateObject();
     cJSON *samples = cJSON_CreateArray();
+    char *text = NULL;
+
     if (!root || !link || !metrics || !samples) {
-        cJSON_Delete(root);
-        cJSON_Delete(link);
-        cJSON_Delete(metrics);
-        cJSON_Delete(samples);
-        return NULL;
+        goto cleanup;
     }
 
-    cJSON_AddNumberToObject(root, "v", 1);
-    cJSON_AddStringToObject(root, "node_id", "esp32c6-01");
-    cJSON_AddStringToObject(root, "vehicle_id", "fleet-demo-001");
-    cJSON_AddStringToObject(root, "ble_peer", "46:FC:0D:32:1E:66");
-    cJSON_AddStringToObject(root, "adapter", "MODAXE OBDII");
-    cJSON_AddStringToObject(root, "profile", "can_11_500");
-    cJSON_AddStringToObject(root, "protocol", "ISO15765-4 CAN11/500");
-    cJSON_AddNumberToObject(root, "seq", s->sequence);
-    cJSON_AddNumberToObject(root, "ts_ms", (double)s->ts_ms);
-    cJSON_AddNumberToObject(root, "uptime_s", (double)s->uptime_s);
+    if (!cJSON_AddNumberToObject(root, "v", 1) ||
+        !cJSON_AddStringToObject(root, "node_id", "esp32c6-01") ||
+        !cJSON_AddStringToObject(root, "vehicle_id", "fleet-demo-001") ||
+        !cJSON_AddStringToObject(root, "ble_peer", "46:FC:0D:32:1E:66") ||
+        !cJSON_AddStringToObject(root, "adapter", "MODAXE OBDII") ||
+        !cJSON_AddStringToObject(root, "profile", "can_11_500") ||
+        !cJSON_AddStringToObject(root, "protocol", "ISO15765-4 CAN11/500") ||
+        !cJSON_AddNumberToObject(root, "seq", s->sequence) ||
+        !cJSON_AddNumberToObject(root, "ts_ms", (double)s->ts_ms) ||
+        !cJSON_AddNumberToObject(root, "uptime_s", (double)s->uptime_s)) {
+        goto cleanup;
+    }
 
-    cJSON_AddBoolToObject(link, "ble_connected", true);
-    cJSON_AddBoolToObject(link, "elm_ready", true);
-    cJSON_AddStringToObject(link, "poller", "on");
-    cJSON_AddItemToObject(root, "link", link);
+    if (!cJSON_AddBoolToObject(link, "ble_connected", true) ||
+        !cJSON_AddBoolToObject(link, "elm_ready", true) ||
+        !cJSON_AddStringToObject(link, "poller", "on") ||
+        !cJSON_AddItemToObject(root, "link", link)) {
+        goto cleanup;
+    }
+    link = NULL;
 
-    cJSON_AddNumberToObject(metrics, "cmds_ok", cmds_ok);
-    cJSON_AddNumberToObject(metrics, "cmds_fail", s_cmds_fail);
-    cJSON_AddNumberToObject(metrics, "ble_reconnects", 0);
-    cJSON_AddNumberToObject(metrics, "blocked_cmds", 0);
-    cJSON_AddNumberToObject(metrics, "telemetry_drops", 0);
-    cJSON_AddItemToObject(root, "metrics", metrics);
+    if (!cJSON_AddNumberToObject(metrics, "cmds_ok", cmds_ok) ||
+        !cJSON_AddNumberToObject(metrics, "cmds_fail", s_cmds_fail) ||
+        !cJSON_AddNumberToObject(metrics, "ble_reconnects", 0) ||
+        !cJSON_AddNumberToObject(metrics, "blocked_cmds", 0) ||
+        !cJSON_AddNumberToObject(metrics, "telemetry_drops", 0) ||
+        !cJSON_AddItemToObject(root, "metrics", metrics)) {
+        goto cleanup;
+    }
+    metrics = NULL;
 
-    add_sample(samples, "rpm", "010C", s->rpm, "rpm", s->rpm_raw);
-    add_sample(samples, "speed", "010D", s->speed_kmh, "km/h", s->speed_raw);
-    add_sample(samples, "coolant_c", "0105", s->coolant_c, "C", s->coolant_raw);
-    add_sample(samples, "throttle_pct", "0111", s->throttle_pct, "%", s->throttle_raw);
-    add_sample(samples, "voltage", "ATRV", s->voltage_v, "V", s->voltage_raw);
-    cJSON_AddItemToObject(root, "samples", samples);
+    if (!add_sample(samples, "rpm", "010C", s->rpm, "rpm", s->rpm_raw) ||
+        !add_sample(samples, "speed", "010D", s->speed_kmh, "km/h", s->speed_raw) ||
+        !add_sample(samples, "coolant_c", "0105", s->coolant_c, "C", s->coolant_raw) ||
+        !add_sample(samples, "throttle_pct", "0111", s->throttle_pct, "%",
+                    s->throttle_raw) ||
+        !add_sample(samples, "voltage", "ATRV", s->voltage_v, "V", s->voltage_raw) ||
+        !cJSON_AddItemToObject(root, "samples", samples)) {
+        goto cleanup;
+    }
+    samples = NULL;
 
-    char *text = cJSON_PrintUnformatted(root);
+    text = cJSON_PrintUnformatted(root);
+
+cleanup:
     cJSON_Delete(root);
+    cJSON_Delete(link);
+    cJSON_Delete(metrics);
+    cJSON_Delete(samples);
     return text;
 }
 
