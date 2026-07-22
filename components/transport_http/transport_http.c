@@ -125,6 +125,8 @@ static esp_err_t start_httpd(void)
     config.server_port = 80;
     config.max_uri_handlers = HTTP_MAX_URI_HANDLERS;
     config.lru_purge_enable = true;
+    /* Default 4KB stack overflows on /api/status + cJSON (phone SoftAP crash). */
+    config.stack_size = 12288;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {

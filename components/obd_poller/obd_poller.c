@@ -46,6 +46,9 @@ static bool s_profile_loaded;
 static uint64_t s_last_fire_ms[MAX_PROFILE_ITEMS];
 static volatile bool s_stop_requested;
 static bool s_running;
+static volatile bool s_poll_enabled;
+static uint32_t s_bus_fail_backoff_ms;
+static uint64_t s_bus_fail_until_ms;
 
 static uint64_t now_ms(void)
 {
@@ -317,7 +320,26 @@ static void poller_task(void *arg)
             continue;
         }
 
+        /* Raw console/HTTP commands always run; profile polling is gated. */
+        if (!s_poll_enabled) {
+            if (xQueueReceive(s_raw_queue, &raw, pdMS_TO_TICKS(200)) == pdTRUE) {
+                handle_raw_request(&raw);
+            }
+            continue;
+        }
+
         uint64_t now = now_ms();
+        if (s_bus_fail_until_ms != 0 && now < s_bus_fail_until_ms) {
+            uint32_t wait_ms = (uint32_t)(s_bus_fail_until_ms - now);
+            if (wait_ms > 500) {
+                wait_ms = 500;
+            }
+            if (xQueueReceive(s_raw_queue, &raw, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+                handle_raw_request(&raw);
+            }
+            continue;
+        }
+
         int item_idx = -1;
         profile_item_t item;
 
@@ -348,6 +370,21 @@ static void poller_task(void *arg)
                                                 CONFIG_ELM_CMD_TIMEOUT_MS);
         if (err == ESP_OK) {
             handle_poll_response(&item, resp);
+            s_bus_fail_backoff_ms = 0;
+            s_bus_fail_until_ms = 0;
+        } else if (err == ESP_FAIL || err == ESP_ERR_TIMEOUT) {
+            /* Back off hard on bus/protocol failures so we don't spam ATSP search. */
+            if (s_bus_fail_backoff_ms == 0) {
+                s_bus_fail_backoff_ms = 2000;
+            } else if (s_bus_fail_backoff_ms < 15000) {
+                s_bus_fail_backoff_ms *= 2;
+                if (s_bus_fail_backoff_ms > 15000) {
+                    s_bus_fail_backoff_ms = 15000;
+                }
+            }
+            s_bus_fail_until_ms = now_ms() + s_bus_fail_backoff_ms;
+            ESP_LOGW(TAG, "bus error on %s (%s); backoff %lu ms", item.cmd,
+                     esp_err_to_name(err), (unsigned long)s_bus_fail_backoff_ms);
         }
 
         if (xSemaphoreTake(s_profile_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -411,6 +448,9 @@ esp_err_t obd_poller_start(void)
     }
 
     s_stop_requested = false;
+    s_poll_enabled = false; /* enabled after ELM init sequence succeeds */
+    s_bus_fail_backoff_ms = 0;
+    s_bus_fail_until_ms = 0;
     BaseType_t created = xTaskCreate(poller_task, "obd_poller", POLLER_TASK_STACK, NULL,
                                      POLLER_TASK_PRIO, &s_task_handle);
     if (created != pdPASS) {
@@ -420,6 +460,21 @@ esp_err_t obd_poller_start(void)
 
     s_running = true;
     return ESP_OK;
+}
+
+void obd_poller_set_enabled(bool enabled)
+{
+    s_poll_enabled = enabled;
+    if (enabled) {
+        s_bus_fail_backoff_ms = 0;
+        s_bus_fail_until_ms = 0;
+    }
+    ESP_LOGI(TAG, "profile polling %s", enabled ? "enabled" : "paused");
+}
+
+bool obd_poller_is_enabled(void)
+{
+    return s_poll_enabled;
 }
 
 esp_err_t obd_poller_stop(void)

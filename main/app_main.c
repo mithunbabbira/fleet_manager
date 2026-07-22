@@ -41,7 +41,12 @@ static void bonded_boot_init_task(void *arg)
     }
 
     if (!elm327_client_is_ready()) {
-        ESP_LOGW(TAG, "bonded boot: transport not ready after %d ms", BONDED_BOOT_WAIT_MS);
+        ESP_LOGW(TAG, "bonded boot: transport not ready after %d ms — clearing stale peer",
+                 BONDED_BOOT_WAIT_MS);
+        ble_elm_clear_peer();
+        ble_bond_t empty;
+        memset(&empty, 0, sizeof(empty));
+        profile_store_set_bond(&empty);
         vTaskDelete(NULL);
         return;
     }
@@ -68,8 +73,14 @@ static void bonded_boot_init_task(void *arg)
     err = elm327_client_run_init_sequence(profile.init_at, profile.init_at_count);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "bonded boot: init sequence OK");
+        obd_poller_set_enabled(true);
+        /* Kick protocol discovery with a long-timeout PID support query. */
+        char resp[128];
+        esp_err_t pid_err = elm327_client_transact("0100", resp, sizeof(resp), 15000);
+        ESP_LOGI(TAG, "bonded boot: 0100 -> %s (%s)", resp, esp_err_to_name(pid_err));
     } else {
         ESP_LOGE(TAG, "bonded boot: init sequence failed: %s", esp_err_to_name(err));
+        obd_poller_set_enabled(false);
     }
 
     vTaskDelete(NULL);
@@ -136,6 +147,13 @@ void app_main(void)
     ESP_ERROR_CHECK(obd_poller_start());
     ESP_LOGI(TAG, "obd_poller started");
 
-    ESP_ERROR_CHECK(ble_elm_start_auto_reconnect());
-    ESP_LOGI(TAG, "ble_elm auto-reconnect enabled");
+    /* Auto-reconnect only after a live session exists. Enabling it against a
+     * stale random address blocks BLE scan (EALREADY) and wastes airtime. */
+    if (profile_store_get_bond(&bond) == ESP_OK && bond.addr_set &&
+        ble_elm_is_connected()) {
+        ESP_ERROR_CHECK(ble_elm_start_auto_reconnect());
+        ESP_LOGI(TAG, "ble_elm auto-reconnect enabled");
+    } else {
+        ESP_LOGI(TAG, "ble_elm auto-reconnect deferred until select/connect succeeds");
+    }
 }

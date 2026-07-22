@@ -8,12 +8,26 @@ static const obd_profile_t k_builtin_profiles[] = {
         .init_at = {"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0"},
         .init_at_count = 6,
         .items = {
-            {.cmd = "010C", .interval_ms = 200, .decode = "rpm"},
-            {.cmd = "010D", .interval_ms = 200, .decode = "speed"},
+            {.cmd = "010C", .interval_ms = 500, .decode = "rpm"},
+            {.cmd = "010D", .interval_ms = 500, .decode = "speed"},
             {.cmd = "0105", .interval_ms = 2000, .decode = "coolant_c"},
             {.cmd = "ATRV", .interval_ms = 5000, .decode = "voltage"},
         },
         .item_count = 4,
+    },
+    {
+        /* Prefer ISO 15765-4 CAN (11-bit, 500 kbaud) — common on modern cars. */
+        .name = "can_11_500",
+        .init_at = {"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP6"},
+        .init_at_count = 6,
+        .items = {
+            {.cmd = "010C", .interval_ms = 500, .decode = "rpm"},
+            {.cmd = "010D", .interval_ms = 500, .decode = "speed"},
+            {.cmd = "0105", .interval_ms = 2000, .decode = "coolant_c"},
+            {.cmd = "0111", .interval_ms = 1000, .decode = "throttle_pct"},
+            {.cmd = "ATRV", .interval_ms = 5000, .decode = "voltage"},
+        },
+        .item_count = 5,
     },
     {
         .name = "diagnostics",

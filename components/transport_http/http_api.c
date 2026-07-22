@@ -341,9 +341,20 @@ static esp_err_t parse_profile_json(const cJSON *root, obd_profile_t *out)
 
 static esp_err_t api_status_get(httpd_req_t *req)
 {
+    ESP_LOGI(TAG, "GET /api/status");
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ble_connected", ble_elm_is_connected());
     cJSON_AddBoolToObject(root, "elm_ready", elm327_client_is_ready());
+    cJSON_AddBoolToObject(root, "poller_enabled", obd_poller_is_enabled());
+
+    uint8_t peer[6];
+    if (ble_elm_get_peer_addr(peer) == ESP_OK) {
+        char addr_str[18];
+        format_addr(peer, addr_str, sizeof(addr_str));
+        cJSON_AddStringToObject(root, "peer_addr", addr_str);
+    } else {
+        cJSON_AddNullToObject(root, "peer_addr");
+    }
 
     obd_profile_t active;
     if (profile_store_get_active(&active) == ESP_OK) {
@@ -370,6 +381,11 @@ static void scan_task(void *arg)
 
 static esp_err_t api_ble_scan_post(httpd_req_t *req)
 {
+    if (ble_elm_is_connected()) {
+        return send_error_json(req, "409 Conflict", "already_connected",
+                               "disconnect BLE first; connected adapters usually do not advertise");
+    }
+
     BaseType_t created = xTaskCreate(scan_task, "http_ble_scan", 4096, NULL, 4, NULL);
     if (created != pdPASS) {
         return send_error_json(req, HTTPD_500, "scan_start_failed", NULL);
@@ -456,6 +472,8 @@ static esp_err_t api_ble_select_post(httpd_req_t *req)
     bond.addr_set = true;
     if (name[0]) {
         snprintf(bond.name, sizeof(bond.name), "%s", name);
+    } else {
+        snprintf(bond.name, sizeof(bond.name), "%s", "MODAXE OBDII");
     }
     profile_store_set_bond(&bond);
 
@@ -484,12 +502,31 @@ static esp_err_t api_ble_select_post(httpd_req_t *req)
         } else {
             init_ok = true;
         }
+        if (init_ok) {
+            char probe[128];
+            (void)elm327_client_transact("0100", probe, sizeof(probe), 15000);
+            obd_poller_set_enabled(true);
+        }
     }
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "connected", connected);
     cJSON_AddBoolToObject(root, "ready", ready);
     cJSON_AddBoolToObject(root, "init_ok", init_ok);
+    return send_ok_json(req, root);
+}
+
+/* ---- POST /api/ble/disconnect ----------------------------------------------- */
+
+static esp_err_t api_ble_disconnect_post(httpd_req_t *req)
+{
+    esp_err_t err = ble_elm_disconnect();
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK || err == ESP_ERR_INVALID_STATE);
+    cJSON_AddBoolToObject(root, "ble_connected", ble_elm_is_connected());
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
     return send_ok_json(req, root);
 }
 
@@ -555,6 +592,44 @@ static esp_err_t api_elm_cmd_post(httpd_req_t *req)
     cJSON_AddStringToObject(root, "cmd", norm);
     cJSON_AddStringToObject(root, "raw", resp);
     try_decode(norm, resp, root);
+    return send_ok_json(req, root);
+}
+
+/* ---- POST /api/elm/init ------------------------------------------------------ */
+
+static esp_err_t api_elm_init_post(httpd_req_t *req)
+{
+    if (!elm327_client_is_ready()) {
+        return send_error_json(req, "503 Service Unavailable", "not_ready",
+                               "BLE/ELM transport not ready");
+    }
+
+    obd_poller_set_enabled(false);
+    obd_profile_t profile;
+    bool init_ok = false;
+    char probe[160] = {0};
+
+    if (profile_store_get_active(&profile) == ESP_OK && profile.init_at_count > 0) {
+        init_ok = elm327_client_run_init_sequence(profile.init_at, profile.init_at_count) == ESP_OK;
+    } else {
+        init_ok = true;
+    }
+
+    esp_err_t probe_err = ESP_FAIL;
+    if (init_ok) {
+        probe_err = elm327_client_transact("0100", probe, sizeof(probe), 15000);
+        if (probe_err == ESP_OK || probe_err == ESP_ERR_NOT_FOUND) {
+            obd_poller_set_enabled(true);
+        }
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", init_ok && (probe_err == ESP_OK || probe_err == ESP_ERR_NOT_FOUND));
+    cJSON_AddBoolToObject(root, "init_ok", init_ok);
+    cJSON_AddStringToObject(root, "probe_cmd", "0100");
+    cJSON_AddStringToObject(root, "probe_resp", probe);
+    cJSON_AddStringToObject(root, "probe_err", esp_err_to_name(probe_err));
+    cJSON_AddBoolToObject(root, "poller_enabled", obd_poller_is_enabled());
     return send_ok_json(req, root);
 }
 
@@ -674,10 +749,18 @@ static esp_err_t api_profiles_active_post(httpd_req_t *req)
 
     bool init_ok = false;
     if (elm327_client_is_ready()) {
+        obd_poller_set_enabled(false);
         obd_profile_t profile;
         if (profile_store_get_active(&profile) == ESP_OK && profile.init_at_count > 0) {
             init_ok =
                 elm327_client_run_init_sequence(profile.init_at, profile.init_at_count) == ESP_OK;
+        } else {
+            init_ok = true;
+        }
+        if (init_ok) {
+            char probe[128];
+            (void)elm327_client_transact("0100", probe, sizeof(probe), 15000);
+            obd_poller_set_enabled(true);
         }
     }
 
@@ -790,6 +873,7 @@ static esp_err_t api_metrics_get(httpd_req_t *req)
 
 static esp_err_t root_get(httpd_req_t *req)
 {
+    ESP_LOGI(TAG, "GET /");
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, TRANSPORT_HTTP_INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
@@ -809,7 +893,9 @@ esp_err_t http_api_register(httpd_handle_t server)
         {.uri = "/api/ble/scan", .method = HTTP_POST, .handler = api_ble_scan_post},
         {.uri = "/api/ble/devices", .method = HTTP_GET, .handler = api_ble_devices_get},
         {.uri = "/api/ble/select", .method = HTTP_POST, .handler = api_ble_select_post},
+        {.uri = "/api/ble/disconnect", .method = HTTP_POST, .handler = api_ble_disconnect_post},
         {.uri = "/api/elm/cmd", .method = HTTP_POST, .handler = api_elm_cmd_post},
+        {.uri = "/api/elm/init", .method = HTTP_POST, .handler = api_elm_init_post},
         {.uri = "/api/profiles", .method = HTTP_GET, .handler = api_profiles_handler},
         {.uri = "/api/profiles", .method = HTTP_PUT, .handler = api_profiles_handler},
         {.uri = "/api/profiles/active", .method = HTTP_POST, .handler = api_profiles_active_post},

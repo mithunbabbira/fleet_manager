@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -23,6 +24,11 @@ static esp_err_t classify_response(const char *resp)
     if (strstr(resp, "UNABLE TO CONNECT") != NULL || strstr(resp, "ERROR") != NULL) {
         return ESP_FAIL;
     }
+    /* Incomplete protocol search — treat as timeout so caller can retry. */
+    if (strstr(resp, "SEARCHING") != NULL && strstr(resp, "41") == NULL &&
+        strstr(resp, "OK") == NULL) {
+        return ESP_ERR_TIMEOUT;
+    }
 
     const char *p = resp;
     while (*p != '\0' && isspace((unsigned char)*p)) {
@@ -33,6 +39,19 @@ static esp_err_t classify_response(const char *resp)
     }
 
     return ESP_OK;
+}
+
+static uint32_t timeout_for_cmd(const char *cmd, uint32_t requested_ms)
+{
+    uint32_t timeout_ms = requested_ms ? requested_ms : CONFIG_ELM_CMD_TIMEOUT_MS;
+    /* ATZ needs settle time; first OBD after ATSP0 can SEARCH for a long time. */
+    if (strncmp(cmd, "ATZ", 3) == 0 && timeout_ms < 5000) {
+        timeout_ms = 5000;
+    }
+    if ((cmd[0] >= '0' && cmd[0] <= '9') && timeout_ms < CONFIG_ELM_CMD_TIMEOUT_MS) {
+        timeout_ms = CONFIG_ELM_CMD_TIMEOUT_MS;
+    }
+    return timeout_ms;
 }
 
 esp_err_t elm327_client_init(void)
@@ -76,9 +95,7 @@ esp_err_t elm327_client_transact(const char *cmd, char *resp, size_t resp_len, u
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (timeout_ms == 0) {
-        timeout_ms = CONFIG_ELM_CMD_TIMEOUT_MS;
-    }
+    timeout_ms = timeout_for_cmd(cmd, timeout_ms);
 
     if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) {
         return ESP_FAIL;
@@ -150,6 +167,11 @@ esp_err_t elm327_client_run_init_sequence(const char init_at[][16], int count)
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "init sequence aborted at step %d: %s", i, esp_err_to_name(err));
             return err;
+        }
+
+        /* ELM327 needs ~1s after ATZ before accepting further AT commands. */
+        if (strncmp(init_at[i], "ATZ", 3) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 

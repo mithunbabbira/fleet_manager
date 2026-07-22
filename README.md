@@ -11,7 +11,7 @@ Design and implementation notes live under [`docs/superpowers/`](docs/superpower
 
 | Item | Notes |
 |---|---|
-| **ESP32-C6 Mini** | Must have **8 MB flash**. The partition table and `sdkconfig.defaults` assume 8 MB (`factory` + dual OTA slots). |
+| **ESP32-C6 Mini** | **4 MB flash** (ESP32-C6FH4 and similar). Partition table: `factory` + one `ota_0` slot. |
 | **BLE ELM327 Mini** | **Bluetooth Low Energy only.** The ESP32-C6 has no Bluetooth Classic radio — Classic-only adapters will not work. |
 
 ### Verify BLE vs Bluetooth Classic

@@ -21,11 +21,15 @@ esp_err_t ble_elm_get_scan_results(ble_elm_device_t *out, int max, int *count);
 esp_err_t ble_elm_connect_addr(const uint8_t addr[6]);
 esp_err_t ble_elm_disconnect(void);
 bool ble_elm_is_connected(void);
+/** Copy last/current peer BD_ADDR (6 bytes). ESP_ERR_INVALID_STATE if unknown. */
+esp_err_t ble_elm_get_peer_addr(uint8_t addr_out[6]);
 /** Returns transport pointer; is_ready() false until GATT NUS discovered. */
 elm_transport_t *ble_elm_get_transport(void);
 /** Optional: start background reconnect to bonded addr with exp backoff 1..30s */
 esp_err_t ble_elm_start_auto_reconnect(void);
 esp_err_t ble_elm_stop_auto_reconnect(void);
+/** Forget last peer address and cancel pending connect (keeps NVS bond as-is). */
+esp_err_t ble_elm_clear_peer(void);
 
 #ifdef __cplusplus
 }
