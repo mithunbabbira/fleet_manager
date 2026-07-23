@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "net_lte.h"
 #include "nvs_flash.h"
 #include "obd_poller.h"
 #include "profile_store.h"
@@ -108,6 +109,19 @@ void app_main(void)
 
     ESP_ERROR_CHECK(telemetry_bus_init());
     ESP_LOGI(TAG, "telemetry_bus ready");
+
+    /* UART AT check / PPP: requires EC200U wired to GPIO17 TX / GPIO16 RX. */
+    {
+        esp_err_t lte_err = net_lte_start();
+        if (lte_err == ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGI(TAG, "net_lte: disabled (CONFIG_NET_LTE_ENABLE=n)");
+        } else if (lte_err != ESP_OK) {
+            ESP_LOGW(TAG, "net_lte_start: %s (continuing without LTE)",
+                     esp_err_to_name(lte_err));
+        } else {
+            ESP_LOGI(TAG, "net_lte ready");
+        }
+    }
 
     ESP_ERROR_CHECK(ble_elm_init());
     ESP_LOGI(TAG, "ble_elm ready");

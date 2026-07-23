@@ -15,7 +15,7 @@
 
 static const char *TAG = "transport_http";
 
-#define HTTP_MAX_URI_HANDLERS 20
+#define HTTP_MAX_URI_HANDLERS 28
 
 static bool s_started;
 static httpd_handle_t s_server;
@@ -127,6 +127,9 @@ static esp_err_t start_httpd(void)
     config.lru_purge_enable = true;
     /* Default 4KB stack overflows on /api/status + cJSON (phone SoftAP crash). */
     config.stack_size = 12288;
+    /* Protocol auto-detect (ATSP0 + lock) can take two long ELM inits. */
+    config.recv_wait_timeout = 45;
+    config.send_wait_timeout = 45;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {

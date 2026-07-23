@@ -3,6 +3,7 @@
 #include "ble_elm.h"
 #include "cmd_policy.h"
 #include "elm327_client.h"
+#include "net_lte.h"
 #include "obd_poller.h"
 #include "profile_store.h"
 #include "sdkconfig.h"
@@ -163,7 +164,47 @@ static void cmd_help(void)
         "  init\n"
         "  telemetry on|off\n"
         "  unsafe on|off\n"
-        "  metrics\n");
+        "  metrics\n"
+        "  lte [reconnect|test]\n");
+}
+
+static void cmd_lte(char *args)
+{
+    if (args && args[0]) {
+        str_lower(args);
+        if (strcmp(args, "reconnect") == 0) {
+            esp_err_t err = net_lte_reconnect();
+            printf("lte reconnect: %s\n", esp_err_to_name(err));
+            return;
+        }
+        if (strcmp(args, "test") == 0) {
+            printf("lte test: running modem internet self-test (may take up to ~90s)...\n");
+            char report[768];
+            esp_err_t err = net_lte_selftest(report, sizeof(report));
+            printf("%s\n(result: %s)\n", report, esp_err_to_name(err));
+            return;
+        }
+    }
+
+    /* Live refresh so the printed values reflect the modem now, not boot. */
+    net_lte_refresh();
+
+    net_lte_status_t s;
+    if (net_lte_get_status(&s) != ESP_OK) {
+        printf("lte: status unavailable\n");
+        return;
+    }
+    if (!s.enabled) {
+        printf("lte: disabled (CONFIG_NET_LTE_ENABLE=n)\n");
+        return;
+    }
+    printf("lte: uart_ok=%s sim=%s reg=%s attached=%s csq=%d(%ddBm) op=\"%s\" apn=\"%s\"\n",
+           s.uart_ok ? "yes" : "no",
+           s.sim_ready ? "yes" : "no",
+           s.registered ? "yes" : "no",
+           s.attached ? "yes" : "no",
+           s.csq, s.rssi_dbm, s.operator_name, s.apn);
+    printf("     module=\"%s\" note=\"%s\"\n", s.ati, s.last_error);
 }
 
 static void cmd_status(void)
@@ -447,6 +488,8 @@ static void dispatch(char *verb, char *args)
         cmd_unsafe(args);
     } else if (strcmp(verb, "metrics") == 0) {
         cmd_metrics();
+    } else if (strcmp(verb, "lte") == 0) {
+        cmd_lte(args);
     } else {
         printf("unknown command: %s (type 'help')\n", verb);
     }

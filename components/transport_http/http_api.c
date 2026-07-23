@@ -5,6 +5,7 @@
 #include "ble_elm.h"
 #include "cmd_policy.h"
 #include "elm327_client.h"
+#include "net_lte.h"
 #include "obd_codec.h"
 #include "obd_poller.h"
 #include "profile_store.h"
@@ -12,7 +13,10 @@
 #include "telemetry_bus.h"
 
 #include "cJSON.h"
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
@@ -595,6 +599,328 @@ static esp_err_t api_elm_cmd_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/* ---- OBD protocol helpers (ATSP0..9) ----------------------------------------- */
+
+static const char *protocol_label(int sp)
+{
+    switch (sp) {
+    case 0: return "Automatic";
+    case 1: return "SAE J1850 PWM (41.6k)";
+    case 2: return "SAE J1850 VPW (10.4k)";
+    case 3: return "ISO 9141-2";
+    case 4: return "ISO 14230-4 KWP (5 baud)";
+    case 5: return "ISO 14230-4 KWP (fast)";
+    case 6: return "ISO 15765-4 CAN (11-bit/500k)";
+    case 7: return "ISO 15765-4 CAN (29-bit/500k)";
+    case 8: return "ISO 15765-4 CAN (11-bit/250k)";
+    case 9: return "ISO 15765-4 CAN (29-bit/250k)";
+    default: return "Unknown";
+    }
+}
+
+static int parse_atdpn(const char *resp)
+{
+    if (!resp) {
+        return -1;
+    }
+    /* Automatic mode often returns "A6" (auto + found protocol 6). */
+    for (const char *p = resp; *p; ++p) {
+        if ((p[0] == 'A' || p[0] == 'a') && p[1] >= '1' && p[1] <= '9') {
+            return p[1] - '0';
+        }
+    }
+    for (const char *p = resp; *p; ++p) {
+        if (*p >= '1' && *p <= '9') {
+            return *p - '0';
+        }
+        if (*p == '0' && (p[1] == '\0' || p[1] == '\r' || p[1] == '\n' || p[1] == 'O')) {
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void fill_basic_pid_items(obd_profile_t *p)
+{
+    memset(p->items, 0, sizeof(p->items));
+    snprintf(p->items[0].cmd, sizeof(p->items[0].cmd), "%s", "010C");
+    p->items[0].interval_ms = 500;
+    snprintf(p->items[0].decode, sizeof(p->items[0].decode), "%s", "rpm");
+    snprintf(p->items[1].cmd, sizeof(p->items[1].cmd), "%s", "010D");
+    p->items[1].interval_ms = 500;
+    snprintf(p->items[1].decode, sizeof(p->items[1].decode), "%s", "speed");
+    snprintf(p->items[2].cmd, sizeof(p->items[2].cmd), "%s", "0105");
+    p->items[2].interval_ms = 2000;
+    snprintf(p->items[2].decode, sizeof(p->items[2].decode), "%s", "coolant_c");
+    snprintf(p->items[3].cmd, sizeof(p->items[3].cmd), "%s", "ATRV");
+    p->items[3].interval_ms = 5000;
+    snprintf(p->items[3].decode, sizeof(p->items[3].decode), "%s", "voltage");
+    p->item_count = 4;
+}
+
+static esp_err_t ensure_protocol_profile(int sp, char name_out[32])
+{
+    if (sp < 0 || sp > 9 || !name_out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Prefer built-ins when they already encode this ATSP. */
+    if (sp == 0) {
+        snprintf(name_out, 32, "%s", "fleet_basic");
+        return ESP_OK;
+    }
+    if (sp == 6) {
+        snprintf(name_out, 32, "%s", "can_11_500");
+        return ESP_OK;
+    }
+
+    snprintf(name_out, 32, "sp%d", sp);
+
+    obd_profile_t p;
+    memset(&p, 0, sizeof(p));
+    snprintf(p.name, sizeof(p.name), "%s", name_out);
+    snprintf(p.init_at[0], sizeof(p.init_at[0]), "%s", "ATZ");
+    snprintf(p.init_at[1], sizeof(p.init_at[1]), "%s", "ATE0");
+    snprintf(p.init_at[2], sizeof(p.init_at[2]), "%s", "ATL0");
+    snprintf(p.init_at[3], sizeof(p.init_at[3]), "%s", "ATS0");
+    snprintf(p.init_at[4], sizeof(p.init_at[4]), "%s", "ATH0");
+    snprintf(p.init_at[5], sizeof(p.init_at[5]), "ATSP%d", sp);
+    p.init_at_count = 6;
+    fill_basic_pid_items(&p);
+
+    esp_err_t err = profile_store_upsert(&p);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "upsert protocol profile %s failed: %s", name_out, esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t activate_protocol_profile(int sp, bool *init_ok, char *probe, size_t probe_len,
+                                           char *dpn, size_t dpn_len, char *dp, size_t dp_len,
+                                           char active_name[32])
+{
+    if (init_ok) {
+        *init_ok = false;
+    }
+    if (probe && probe_len) {
+        probe[0] = '\0';
+    }
+    if (dpn && dpn_len) {
+        dpn[0] = '\0';
+    }
+    if (dp && dp_len) {
+        dp[0] = '\0';
+    }
+
+    char name[32];
+    esp_err_t err = ensure_protocol_profile(sp, name);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (active_name) {
+        snprintf(active_name, 32, "%s", name);
+    }
+
+    err = profile_store_set_active(name);
+    if (err != ESP_OK) {
+        return err;
+    }
+    (void)obd_poller_reload_active_profile();
+
+    if (!elm327_client_is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    obd_poller_set_enabled(false);
+    obd_profile_t profile;
+    err = profile_store_get_active(&profile);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    bool ok = elm327_client_run_init_sequence(profile.init_at, profile.init_at_count) == ESP_OK;
+    if (init_ok) {
+        *init_ok = ok;
+    }
+    if (!ok) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t probe_err = elm327_client_transact("0100", probe, probe_len, 15000);
+    if (dpn && dpn_len) {
+        (void)elm327_client_transact("ATDPN", dpn, dpn_len, 3000);
+    }
+    if (dp && dp_len) {
+        (void)elm327_client_transact("ATDP", dp, dp_len, 3000);
+    }
+
+    if (probe_err == ESP_OK || probe_err == ESP_ERR_NOT_FOUND) {
+        obd_poller_set_enabled(true);
+    }
+    return probe_err == ESP_OK || probe_err == ESP_ERR_NOT_FOUND ? ESP_OK : probe_err;
+}
+
+/* ---- GET /api/protocol ------------------------------------------------------- */
+
+static esp_err_t api_protocol_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_CreateArray();
+    for (int sp = 0; sp <= 9; ++sp) {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "sp", sp);
+        cJSON_AddStringToObject(item, "label", protocol_label(sp));
+        char atsp[8];
+        snprintf(atsp, sizeof(atsp), "ATSP%d", sp);
+        cJSON_AddStringToObject(item, "atsp", atsp);
+        cJSON_AddItemToArray(arr, item);
+    }
+    cJSON_AddItemToObject(root, "protocols", arr);
+
+    obd_profile_t active;
+    if (profile_store_get_active(&active) == ESP_OK) {
+        cJSON_AddStringToObject(root, "active_profile", active.name);
+        int sp = -1;
+        for (int i = 0; i < active.init_at_count; ++i) {
+            if (strncmp(active.init_at[i], "ATSP", 4) == 0 && active.init_at[i][4] >= '0' &&
+                active.init_at[i][4] <= '9' && active.init_at[i][5] == '\0') {
+                sp = active.init_at[i][4] - '0';
+            }
+        }
+        if (sp >= 0) {
+            cJSON_AddNumberToObject(root, "configured_sp", sp);
+            cJSON_AddStringToObject(root, "configured_label", protocol_label(sp));
+        } else {
+            cJSON_AddNullToObject(root, "configured_sp");
+        }
+    }
+    return send_ok_json(req, root);
+}
+
+/* ---- POST /api/protocol  { "sp": 6 }  manual lock --------------------------- */
+
+static esp_err_t api_protocol_post(httpd_req_t *req)
+{
+    if (!elm327_client_is_ready()) {
+        return send_error_json(req, "503 Service Unavailable", "not_ready",
+                               "BLE/ELM transport not ready — connect adapter first");
+    }
+
+    char body[REQ_BODY_BUF_LEN];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return send_error_json(req, HTTPD_400, "bad_request", "could not read body");
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    cJSON *sp_item = json ? cJSON_GetObjectItem(json, "sp") : NULL;
+    if (!cJSON_IsNumber(sp_item)) {
+        if (json) {
+            cJSON_Delete(json);
+        }
+        return send_error_json(req, HTTPD_400, "invalid_json", "expected {\"sp\":0-9}");
+    }
+    int sp = sp_item->valueint;
+    cJSON_Delete(json);
+    if (sp < 0 || sp > 9) {
+        return send_error_json(req, HTTPD_400, "invalid_sp", "sp must be 0..9");
+    }
+
+    bool init_ok = false;
+    char probe[160] = {0};
+    char dpn[64] = {0};
+    char dp[96] = {0};
+    char active[32] = {0};
+    esp_err_t err = activate_protocol_profile(sp, &init_ok, probe, sizeof(probe), dpn, sizeof(dpn),
+                                              dp, sizeof(dp), active);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+    cJSON_AddStringToObject(root, "mode", "manual");
+    cJSON_AddNumberToObject(root, "sp", sp);
+    cJSON_AddStringToObject(root, "label", protocol_label(sp));
+    cJSON_AddStringToObject(root, "active_profile", active);
+    cJSON_AddBoolToObject(root, "init_ok", init_ok);
+    cJSON_AddStringToObject(root, "probe_resp", probe);
+    cJSON_AddStringToObject(root, "atdpn", dpn);
+    cJSON_AddStringToObject(root, "atdp", dp);
+    cJSON_AddBoolToObject(root, "poller_enabled", obd_poller_is_enabled());
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_protocol_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        return api_protocol_get(req);
+    }
+    return api_protocol_post(req);
+}
+
+/* ---- POST /api/protocol/detect  (ATSP0 + 0100 + ATDPN, then lock) ------------ */
+
+static esp_err_t api_protocol_detect_post(httpd_req_t *req)
+{
+    if (!elm327_client_is_ready()) {
+        return send_error_json(req, "503 Service Unavailable", "not_ready",
+                               "BLE/ELM transport not ready — connect adapter first");
+    }
+
+    bool init_ok = false;
+    char probe[160] = {0};
+    char dpn[64] = {0};
+    char dp[96] = {0};
+    char active[32] = {0};
+
+    /* Step 1: auto search */
+    esp_err_t err = activate_protocol_profile(0, &init_ok, probe, sizeof(probe), dpn, sizeof(dpn),
+                                              dp, sizeof(dp), active);
+    int found = parse_atdpn(dpn);
+
+    /* Step 2: if a concrete protocol was found, lock it (faster next boot). */
+    bool locked = false;
+    if (err == ESP_OK && found >= 1 && found <= 9) {
+        char probe2[160] = {0};
+        char dpn2[64] = {0};
+        char dp2[96] = {0};
+        char active2[32] = {0};
+        bool init2 = false;
+        esp_err_t lock_err =
+            activate_protocol_profile(found, &init2, probe2, sizeof(probe2), dpn2, sizeof(dpn2),
+                                      dp2, sizeof(dp2), active2);
+        if (lock_err == ESP_OK) {
+            locked = true;
+            init_ok = init2;
+            snprintf(probe, sizeof(probe), "%s", probe2);
+            snprintf(dpn, sizeof(dpn), "%s", dpn2);
+            snprintf(dp, sizeof(dp), "%s", dp2);
+            snprintf(active, sizeof(active), "%s", active2);
+        }
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+    cJSON_AddStringToObject(root, "mode", "auto_detect");
+    cJSON_AddBoolToObject(root, "init_ok", init_ok);
+    cJSON_AddStringToObject(root, "probe_resp", probe);
+    cJSON_AddStringToObject(root, "atdpn", dpn);
+    cJSON_AddStringToObject(root, "atdp", dp);
+    if (found >= 0) {
+        cJSON_AddNumberToObject(root, "detected_sp", found);
+        cJSON_AddStringToObject(root, "detected_label", protocol_label(found));
+    } else {
+        cJSON_AddNullToObject(root, "detected_sp");
+    }
+    cJSON_AddBoolToObject(root, "locked", locked);
+    cJSON_AddStringToObject(root, "active_profile", active);
+    cJSON_AddBoolToObject(root, "poller_enabled", obd_poller_is_enabled());
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    return send_ok_json(req, root);
+}
+
 /* ---- POST /api/elm/init ------------------------------------------------------ */
 
 static esp_err_t api_elm_init_post(httpd_req_t *req)
@@ -869,6 +1195,278 @@ static esp_err_t api_metrics_get(httpd_req_t *req)
     return httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
 }
 
+/* ---- GET /api/lte  and  POST /api/lte/reconnect ----------------------------- */
+
+static void add_lte_json(cJSON *root, const net_lte_status_t *s)
+{
+    cJSON_AddBoolToObject(root, "enabled", s->enabled);
+    cJSON_AddBoolToObject(root, "uart_ok", s->uart_ok);
+    cJSON_AddBoolToObject(root, "sim_ready", s->sim_ready);
+    cJSON_AddBoolToObject(root, "registered", s->registered);
+    cJSON_AddBoolToObject(root, "attached", s->attached);
+    cJSON_AddBoolToObject(root, "link_up", s->link_up);
+    cJSON_AddBoolToObject(root, "ip_up", s->ip_up);
+    cJSON_AddNumberToObject(root, "csq", s->csq);
+    cJSON_AddNumberToObject(root, "rssi_dbm", s->rssi_dbm);
+    cJSON_AddStringToObject(root, "operator", s->operator_name);
+    cJSON_AddStringToObject(root, "apn", s->apn);
+    cJSON_AddStringToObject(root, "ip", s->ip);
+    cJSON_AddStringToObject(root, "module", s->ati);
+    cJSON_AddStringToObject(root, "last_error", s->last_error);
+}
+
+static esp_err_t api_lte_get(httpd_req_t *req)
+{
+    (void)net_lte_refresh();
+    net_lte_status_t s;
+    net_lte_get_status(&s);
+    cJSON *root = cJSON_CreateObject();
+    add_lte_json(root, &s);
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_lte_reconnect_post(httpd_req_t *req)
+{
+    esp_err_t err = net_lte_reconnect();
+    net_lte_status_t s;
+    net_lte_get_status(&s);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    add_lte_json(root, &s);
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_lte_test_post(httpd_req_t *req)
+{
+    char report[768];
+    esp_err_t err = net_lte_selftest(report, sizeof(report));
+    net_lte_status_t s;
+    net_lte_get_status(&s);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+    cJSON_AddBoolToObject(root, "internet", s.link_up);
+    cJSON_AddStringToObject(root, "report", report);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    add_lte_json(root, &s);
+    return send_ok_json(req, root);
+}
+
+/* ---- diagnostics: DTC read / clear, VIN ------------------------------------- */
+
+static esp_err_t run_obd_raw(const char *cmd, char *resp, size_t resp_len,
+                             cJSON **err_root, const char **http_status)
+{
+    esp_err_t err = obd_poller_submit_raw(cmd, resp, resp_len, 0);
+    if (err == ESP_ERR_NOT_ALLOWED) {
+        cmd_policy_config_t safety;
+        if (profile_store_get_safety(&safety) != ESP_OK) {
+            memset(&safety, 0, sizeof(safety));
+        }
+        cmd_policy_result_t why = cmd_policy_check(cmd, &safety);
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "error", "blocked_by_policy");
+        cJSON_AddStringToObject(root, "cmd", cmd);
+        cJSON_AddStringToObject(root, "reason", cmd_policy_result_str(why));
+        *err_root = root;
+        *http_status = "403 Forbidden";
+        return err;
+    }
+    if (err != ESP_OK) {
+        const char *st = HTTPD_500;
+        if (err == ESP_ERR_INVALID_STATE) {
+            st = "503 Service Unavailable";
+        } else if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_FOUND) {
+            st = "502 Bad Gateway";
+        }
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", false);
+        cJSON_AddStringToObject(root, "cmd", cmd);
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+        *err_root = root;
+        *http_status = st;
+        return err;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t api_dtc_read_post(httpd_req_t *req)
+{
+    if (!elm327_client_is_ready()) {
+        return send_error_json(req, "503 Service Unavailable", "not_ready",
+                               "connect adapter first");
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *stored = cJSON_CreateArray();
+    cJSON *pending = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "stored", stored);
+    cJSON_AddItemToObject(root, "pending", pending);
+
+    const struct {
+        const char *cmd;
+        cJSON *arr;
+    } queries[] = {{"03", stored}, {"07", pending}};
+
+    for (size_t i = 0; i < sizeof(queries) / sizeof(queries[0]); ++i) {
+        char resp[RESP_BUF_LEN];
+        cJSON *err_root = NULL;
+        const char *http_status = NULL;
+        if (run_obd_raw(queries[i].cmd, resp, sizeof(resp), &err_root, &http_status) != ESP_OK) {
+            cJSON_Delete(root);
+            return send_json(req, http_status, err_root);
+        }
+        char dtcs[8][6];
+        int n = obd_codec_parse_dtcs(resp, dtcs, 8);
+        for (int j = 0; j < n; ++j) {
+            cJSON_AddItemToArray(queries[i].arr, cJSON_CreateString(dtcs[j]));
+        }
+    }
+
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_dtc_clear_post(httpd_req_t *req)
+{
+    if (!elm327_client_is_ready()) {
+        return send_error_json(req, "503 Service Unavailable", "not_ready",
+                               "connect adapter first");
+    }
+
+    char resp[RESP_BUF_LEN];
+    cJSON *err_root = NULL;
+    const char *http_status = NULL;
+    /* Mode 04 is gated by cmd_policy; requires 'unsafe' enabled via /api/safety. */
+    if (run_obd_raw("04", resp, sizeof(resp), &err_root, &http_status) != ESP_OK) {
+        return send_json(req, http_status, err_root);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "raw", resp);
+    cJSON_AddStringToObject(root, "note", "DTCs cleared; MIL may relearn on next drive cycle");
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_vin_get(httpd_req_t *req)
+{
+    if (!elm327_client_is_ready()) {
+        return send_error_json(req, "503 Service Unavailable", "not_ready",
+                               "connect adapter first");
+    }
+
+    char resp[RESP_BUF_LEN];
+    cJSON *err_root = NULL;
+    const char *http_status = NULL;
+    if (run_obd_raw("0902", resp, sizeof(resp), &err_root, &http_status) != ESP_OK) {
+        return send_json(req, http_status, err_root);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    char vin[18];
+    if (obd_codec_parse_vin(resp, vin, sizeof(vin))) {
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddStringToObject(root, "vin", vin);
+    } else {
+        cJSON_AddBoolToObject(root, "ok", false);
+        cJSON_AddStringToObject(root, "raw", resp);
+        cJSON_AddStringToObject(root, "note", "VIN not reported (Mode 09 PID 02 unsupported)");
+    }
+    return send_ok_json(req, root);
+}
+
+/* ---- GET/POST /api/safety --------------------------------------------------- */
+
+static esp_err_t api_safety_get(httpd_req_t *req)
+{
+    cmd_policy_config_t safety;
+    if (profile_store_get_safety(&safety) != ESP_OK) {
+        memset(&safety, 0, sizeof(safety));
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "allow_unsafe", safety.allow_unsafe);
+    cJSON_AddStringToObject(root, "note",
+                            "allow_unsafe permits Mode 04 (clear DTC). Mode 08 is never allowed.");
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_safety_post(httpd_req_t *req)
+{
+    char body[REQ_BODY_BUF_LEN];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return send_error_json(req, HTTPD_400, "bad_request", "could not read body");
+    }
+    cJSON *json = cJSON_Parse(body);
+    cJSON *item = json ? cJSON_GetObjectItem(json, "allow_unsafe") : NULL;
+    if (!cJSON_IsBool(item)) {
+        if (json) {
+            cJSON_Delete(json);
+        }
+        return send_error_json(req, HTTPD_400, "invalid_json", "expected {\"allow_unsafe\":true}");
+    }
+    bool allow = cJSON_IsTrue(item);
+    cJSON_Delete(json);
+
+    esp_err_t err = profile_store_set_allow_unsafe(allow);
+    if (err != ESP_OK) {
+        return send_error_json(req, HTTPD_500, "persist_failed", esp_err_to_name(err));
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "allow_unsafe", allow);
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_safety_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        return api_safety_get(req);
+    }
+    return api_safety_post(req);
+}
+
+/* ---- GET /api/health -------------------------------------------------------- */
+
+static const char *reset_reason_str(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON: return "power_on";
+    case ESP_RST_EXT: return "external";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "int_wdt";
+    case ESP_RST_TASK_WDT: return "task_wdt";
+    case ESP_RST_WDT: return "other_wdt";
+    case ESP_RST_BROWNOUT: return "brownout";
+    default: return "unknown";
+    }
+}
+
+static esp_err_t api_health_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "uptime_s", (double)sys_runtime_metric_get("uptime_s"));
+    cJSON_AddNumberToObject(root, "free_heap", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "min_free_heap", (double)esp_get_minimum_free_heap_size());
+    cJSON_AddStringToObject(root, "reset_reason", reset_reason_str(esp_reset_reason()));
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    if (app) {
+        cJSON_AddStringToObject(root, "fw_version", app->version);
+        cJSON_AddStringToObject(root, "fw_project", app->project_name);
+        cJSON_AddStringToObject(root, "idf_version", app->idf_ver);
+        char built[40];
+        snprintf(built, sizeof(built), "%s %s", app->date, app->time);
+        cJSON_AddStringToObject(root, "built", built);
+    }
+    return send_ok_json(req, root);
+}
+
 /* ---- GET / ----------------------------------------------------------------------- */
 
 static esp_err_t root_get(httpd_req_t *req)
@@ -896,11 +1494,23 @@ esp_err_t http_api_register(httpd_handle_t server)
         {.uri = "/api/ble/disconnect", .method = HTTP_POST, .handler = api_ble_disconnect_post},
         {.uri = "/api/elm/cmd", .method = HTTP_POST, .handler = api_elm_cmd_post},
         {.uri = "/api/elm/init", .method = HTTP_POST, .handler = api_elm_init_post},
+        {.uri = "/api/protocol", .method = HTTP_GET, .handler = api_protocol_handler},
+        {.uri = "/api/protocol", .method = HTTP_POST, .handler = api_protocol_handler},
+        {.uri = "/api/protocol/detect", .method = HTTP_POST, .handler = api_protocol_detect_post},
         {.uri = "/api/profiles", .method = HTTP_GET, .handler = api_profiles_handler},
         {.uri = "/api/profiles", .method = HTTP_PUT, .handler = api_profiles_handler},
         {.uri = "/api/profiles/active", .method = HTTP_POST, .handler = api_profiles_active_post},
         {.uri = "/api/telemetry", .method = HTTP_GET, .handler = api_telemetry_get},
         {.uri = "/api/metrics", .method = HTTP_GET, .handler = api_metrics_get},
+        {.uri = "/api/lte", .method = HTTP_GET, .handler = api_lte_get},
+        {.uri = "/api/lte/reconnect", .method = HTTP_POST, .handler = api_lte_reconnect_post},
+        {.uri = "/api/lte/test", .method = HTTP_POST, .handler = api_lte_test_post},
+        {.uri = "/api/dtc/read", .method = HTTP_POST, .handler = api_dtc_read_post},
+        {.uri = "/api/dtc/clear", .method = HTTP_POST, .handler = api_dtc_clear_post},
+        {.uri = "/api/vin", .method = HTTP_GET, .handler = api_vin_get},
+        {.uri = "/api/safety", .method = HTTP_GET, .handler = api_safety_handler},
+        {.uri = "/api/safety", .method = HTTP_POST, .handler = api_safety_handler},
+        {.uri = "/api/health", .method = HTTP_GET, .handler = api_health_get},
         {.uri = "/", .method = HTTP_GET, .handler = root_get},
     };
 

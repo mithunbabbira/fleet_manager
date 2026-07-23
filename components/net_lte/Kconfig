@@ -1,0 +1,35 @@
+menu "EC200U LTE (net_lte)"
+
+    config NET_LTE_ENABLE
+        bool "Enable EC200U LTE UART / PPP"
+        default y
+        help
+            Uses UART1 GPIO17 (TX) / GPIO16 (RX) to talk to the EC200U.
+            Requires the modem wired to the ESP32-C6 (not only PC USB).
+
+    config NET_LTE_UART_PORT
+        int "UART port number"
+        default 1
+        depends on NET_LTE_ENABLE
+
+    config NET_LTE_UART_TX_GPIO
+        int "Modem UART TX GPIO (ESP → modem RX)"
+        default 17
+        depends on NET_LTE_ENABLE
+
+    config NET_LTE_UART_RX_GPIO
+        int "Modem UART RX GPIO (ESP ← modem TX)"
+        default 16
+        depends on NET_LTE_ENABLE
+
+    config NET_LTE_UART_BAUD
+        int "Modem UART baud"
+        default 115200
+        depends on NET_LTE_ENABLE
+
+    config NET_LTE_APN
+        string "Cellular APN"
+        default "airtelgprs.com"
+        depends on NET_LTE_ENABLE
+
+endmenu
