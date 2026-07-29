@@ -1,0 +1,5 @@
+CONFIG_IDF_TARGET="esp32c6"
+
+# USB Serial/JTAG console (same as root project; Super Mini has no UART bridge)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
