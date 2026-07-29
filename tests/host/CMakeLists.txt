@@ -19,6 +19,15 @@ target_include_directories(test_obd_codec PRIVATE
 )
 target_link_libraries(test_obd_codec m)
 
+add_executable(test_uplink_payload
+    test_uplink_payload.c
+    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
+)
+target_include_directories(test_uplink_payload PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
+)
+
 enable_testing()
 add_test(NAME test_cmd_policy COMMAND test_cmd_policy)
 add_test(NAME test_obd_codec COMMAND test_obd_codec)
+add_test(NAME test_uplink_payload COMMAND test_uplink_payload)

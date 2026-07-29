@@ -46,6 +46,17 @@ esp_err_t net_lte_selftest(char *report, size_t report_len);
 
 esp_err_t net_lte_reconnect(void);
 
+typedef struct {
+    int http_status; /* 0 if unknown / transport failed before status */
+    char error[96];
+} net_lte_http_result_t;
+
+/**
+ * HTTPS POST JSON body via Quectel QHTTP* (no PPP).
+ * Treats HTTP 2xx as success. Serializes on the shared UART AT mutex.
+ */
+esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out);
+
 #ifdef __cplusplus
 }
 #endif

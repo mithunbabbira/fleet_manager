@@ -16,7 +16,17 @@ int main(void)
 
     /* 41 0D 32 → speed 50 km/h */
     assert(obd_codec_decode_mode01("410D32", 0x0D, &d));
+    assert(d.ok);
     assert(fabs(d.value - 50.0) < 0.01);
+
+    /* Parked: speed 0 must remain a valid ok sample (not treated as missing). */
+    assert(obd_codec_decode_mode01("410D00", 0x0D, &d));
+    assert(d.ok);
+    assert(fabs(d.value - 0.0) < 0.01);
+
+    /* Incomplete mode-01 frame must not invent a speed reading. */
+    assert(!obd_codec_decode_mode01("410D", 0x0D, &d));
+    assert(!obd_codec_decode_mode01("NO DATA", 0x0D, &d));
 
     /* 41 05 64 → coolant 60 C (A-40) */
     assert(obd_codec_decode_mode01("41 05 64", 0x05, &d));

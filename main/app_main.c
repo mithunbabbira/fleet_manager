@@ -11,6 +11,7 @@
 #include "telemetry_bus.h"
 #include "transport_http.h"
 #include "transport_serial.h"
+#include "telemetry_uplink.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -120,6 +121,16 @@ void app_main(void)
                      esp_err_to_name(lte_err));
         } else {
             ESP_LOGI(TAG, "net_lte ready");
+        }
+    }
+
+    {
+        esp_err_t up_err = telemetry_uplink_start();
+        if (up_err != ESP_OK) {
+            ESP_LOGW(TAG, "telemetry_uplink_start: %s (continuing)",
+                     esp_err_to_name(up_err));
+        } else {
+            ESP_LOGI(TAG, "telemetry_uplink ready");
         }
     }
 

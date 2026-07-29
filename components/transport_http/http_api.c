@@ -11,6 +11,7 @@
 #include "profile_store.h"
 #include "sys_runtime.h"
 #include "telemetry_bus.h"
+#include "telemetry_uplink.h"
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
@@ -1256,6 +1257,123 @@ static esp_err_t api_lte_test_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/* ---- Cloud uplink ---------------------------------------------------------- */
+
+static void add_uplink_json(cJSON *root, const telemetry_uplink_status_t *st)
+{
+    cJSON_AddBoolToObject(root, "enabled", st->config.enabled);
+    cJSON_AddNumberToObject(root, "interval_s", st->config.interval_s);
+    cJSON_AddStringToObject(root, "device_id", st->config.device_id);
+    cJSON_AddStringToObject(root, "node_id", st->config.node_id);
+    cJSON_AddStringToObject(root, "schema_id", st->schema_id ? st->schema_id : "");
+    cJSON_AddStringToObject(root, "url", st->url ? st->url : "");
+    cJSON *last = cJSON_CreateObject();
+    cJSON_AddBoolToObject(last, "ok", st->last.ok);
+    cJSON_AddBoolToObject(last, "skipped", st->last.skipped);
+    cJSON_AddNumberToObject(last, "http_status", st->last.http_status);
+    cJSON_AddNumberToObject(last, "ts_ms", (double)st->last.ts_ms);
+    uint64_t age = 0;
+    if (st->last.ts_ms > 0) {
+        uint64_t now = (uint64_t)(esp_timer_get_time() / 1000);
+        age = (now >= st->last.ts_ms) ? (now - st->last.ts_ms) : 0;
+    }
+    cJSON_AddNumberToObject(last, "age_ms", (double)age);
+    cJSON_AddStringToObject(last, "reason", st->last.reason);
+    cJSON_AddStringToObject(last, "error", st->last.error);
+    cJSON_AddItemToObject(root, "last", last);
+}
+
+static esp_err_t api_uplink_get(httpd_req_t *req)
+{
+    telemetry_uplink_status_t st;
+    esp_err_t err = telemetry_uplink_get_status(&st);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+    }
+    cJSON *root = cJSON_CreateObject();
+    add_uplink_json(root, &st);
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_uplink_post(httpd_req_t *req)
+{
+    char body[320];
+    esp_err_t err = read_body(req, body, sizeof(body));
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
+    }
+    cJSON *json = cJSON_Parse(body);
+    if (!json) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid json");
+    }
+
+    telemetry_uplink_config_t cfg;
+    err = telemetry_uplink_get_config(&cfg);
+    if (err != ESP_OK) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+    }
+
+    cJSON *en = cJSON_GetObjectItem(json, "enabled");
+    if (cJSON_IsBool(en)) {
+        cfg.enabled = cJSON_IsTrue(en);
+    }
+    cJSON *iv = cJSON_GetObjectItem(json, "interval_s");
+    if (cJSON_IsNumber(iv)) {
+        int v = iv->valueint;
+        if (v < 1) {
+            v = 1;
+        }
+        if (v > 300) {
+            v = 300;
+        }
+        cfg.interval_s = (uint16_t)v;
+    }
+    cJSON *did = cJSON_GetObjectItem(json, "device_id");
+    if (cJSON_IsString(did) && did->valuestring) {
+        snprintf(cfg.device_id, sizeof(cfg.device_id), "%s", did->valuestring);
+    }
+    cJSON *nid = cJSON_GetObjectItem(json, "node_id");
+    if (cJSON_IsString(nid) && nid->valuestring) {
+        snprintf(cfg.node_id, sizeof(cfg.node_id), "%s", nid->valuestring);
+    }
+    cJSON_Delete(json);
+
+    err = telemetry_uplink_set_config(&cfg);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, esp_err_to_name(err));
+    }
+
+    telemetry_uplink_status_t st;
+    telemetry_uplink_get_status(&st);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    add_uplink_json(root, &st);
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_uplink_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        return api_uplink_get(req);
+    }
+    return api_uplink_post(req);
+}
+
+static esp_err_t api_uplink_send_post(httpd_req_t *req)
+{
+    esp_err_t err = telemetry_uplink_send_now();
+    telemetry_uplink_status_t st;
+    telemetry_uplink_get_status(&st);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK);
+    if (err != ESP_OK) {
+        cJSON_AddStringToObject(root, "error", esp_err_to_name(err));
+    }
+    add_uplink_json(root, &st);
+    return send_ok_json(req, root);
+}
+
 /* ---- diagnostics: DTC read / clear, VIN ------------------------------------- */
 
 static esp_err_t run_obd_raw(const char *cmd, char *resp, size_t resp_len,
@@ -1505,6 +1623,9 @@ esp_err_t http_api_register(httpd_handle_t server)
         {.uri = "/api/lte", .method = HTTP_GET, .handler = api_lte_get},
         {.uri = "/api/lte/reconnect", .method = HTTP_POST, .handler = api_lte_reconnect_post},
         {.uri = "/api/lte/test", .method = HTTP_POST, .handler = api_lte_test_post},
+        {.uri = "/api/uplink", .method = HTTP_GET, .handler = api_uplink_handler},
+        {.uri = "/api/uplink", .method = HTTP_POST, .handler = api_uplink_handler},
+        {.uri = "/api/uplink/send", .method = HTTP_POST, .handler = api_uplink_send_post},
         {.uri = "/api/dtc/read", .method = HTTP_POST, .handler = api_dtc_read_post},
         {.uri = "/api/dtc/clear", .method = HTTP_POST, .handler = api_dtc_clear_post},
         {.uri = "/api/vin", .method = HTTP_GET, .handler = api_vin_get},

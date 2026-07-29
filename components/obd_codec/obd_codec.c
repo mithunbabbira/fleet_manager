@@ -60,25 +60,46 @@ bool obd_codec_decode_mode01(const char *response, uint8_t pid, obd_decoded_t *o
     int i = 0;
     while (i + 2 < n) {
         if (bytes[i] == 0x41 && bytes[i + 1] == pid) {
-            uint8_t A = (i + 2 < n) ? bytes[i + 2] : 0;
+            /* Require payload byte(s); do not invent A/B from missing data. */
+            if (i + 2 >= n) {
+                return false;
+            }
+            uint8_t A = bytes[i + 2];
             uint8_t B = (i + 3 < n) ? bytes[i + 3] : 0;
-            snprintf(out->raw_hex, sizeof(out->raw_hex), "%02X%02X%02X%02X",
-                     bytes[i], bytes[i + 1], A, B);
-            out->ok = true;
             switch (pid) {
             case 0x0C:
+                if (i + 3 >= n) {
+                    return false;
+                }
+                snprintf(out->raw_hex, sizeof(out->raw_hex), "%02X%02X%02X%02X",
+                         bytes[i], bytes[i + 1], A, B);
+                out->ok = true;
                 out->name = "rpm"; out->unit = "rpm";
                 out->value = ((A * 256.0) + B) / 4.0; return true;
             case 0x0D:
+                /* Speed is a single data byte (0..255 km/h). Incomplete frames
+                 * must not surface as a fake reading on SoftAP / uplink. */
+                snprintf(out->raw_hex, sizeof(out->raw_hex), "%02X%02X%02X",
+                         bytes[i], bytes[i + 1], A);
+                out->ok = true;
                 out->name = "speed"; out->unit = "km/h";
                 out->value = A; return true;
             case 0x05:
+                snprintf(out->raw_hex, sizeof(out->raw_hex), "%02X%02X%02X",
+                         bytes[i], bytes[i + 1], A);
+                out->ok = true;
                 out->name = "coolant_c"; out->unit = "C";
                 out->value = (double)A - 40.0; return true;
             case 0x11:
+                snprintf(out->raw_hex, sizeof(out->raw_hex), "%02X%02X%02X",
+                         bytes[i], bytes[i + 1], A);
+                out->ok = true;
                 out->name = "throttle_pct"; out->unit = "%";
                 out->value = A * 100.0 / 255.0; return true;
             case 0x2F:
+                snprintf(out->raw_hex, sizeof(out->raw_hex), "%02X%02X%02X",
+                         bytes[i], bytes[i + 1], A);
+                out->ok = true;
                 out->name = "fuel_pct"; out->unit = "%";
                 out->value = A * 100.0 / 255.0; return true;
             default:

@@ -204,35 +204,13 @@ IDF default event loop.
 
 ---
 
-## 7. Active WIP: LTE (net_lte / EC200U)
+## 7. Active WIP: LTE + cloud uplink
 
-**Status: Phase 1 only — UART AT bring-up + modem status. PPP / internet data path is NOT implemented.**
+**LTE status:** UART AT bring-up + modem self-test + **HTTPS POST via Quectel QHTTP*** (no PPP/`esp_netif` yet).
 
-Files: `components/net_lte/{net_lte.c,include/net_lte.h,CMakeLists.txt,Kconfig}`
-(untracked/new). Wired into `main/`, `transport_serial`, `transport_http`.
+**Cloud uplink (`telemetry_uplink`):** SoftAP “Cloud uplink” card / `/api/uplink*`. Default **disabled**. When enabled, posts OBD snapshots to `https://api.trafyn.info/nc-events-api/v2/messages` (`schemaId` 1087) over LTE on the NVS interval (default 5 s). Gated on live BLE+ELM+poller+fresh sample. Missing/stale PIDs are JSON `null` + `*_ok:false`.
 
-What works today (`net_lte.c`):
-- `net_lte_start()` installs UART1 driver, spawns background `lte_bringup` task
-  (non-blocking so SoftAP/BLE boot isn't delayed).
-- Bring-up retries `AT` up to 40×500 ms (~20 s), then `ATI` (parses EC200/Quectel
-  banner), then `net_lte_refresh()`.
-- `net_lte_refresh()` issues `AT+CPIN?` (sim_ready), `AT+CSQ` (csq→rssi_dbm),
-  `AT+COPS?` (operator_name), `AT+CEREG?`/`AT+CREG?` (registered), `AT+CGATT?` (attached).
-- Mutex-protected `at_transact`; drains stale RX; returns on OK/ERROR/READY.
-- `net_lte_get_status(net_lte_status_t*)`, `net_lte_reconnect()` (= restart).
-- When `CONFIG_NET_LTE_ENABLE=n`, all fns return `ESP_ERR_NOT_SUPPORTED`/stub status.
-
-Status struct fields (`net_lte.h`): `enabled, uart_ok, link_up, ip_up, sim_ready,
-registered, attached, csq, rssi_dbm, ip[], apn[], operator_name[], last_error[], ati[]`.
-
-**Explicitly incomplete:** `link_up`, `ip_up`, `ip[]` are never set. `last_error`
-ends as `"UART AT OK; PPP not implemented yet"`; log warns `"PPP/Internet still TODO."`
-(see `net_lte.c:169-171`).
-
-Host tool: `tools/ec200u_at_probe.py` (pyserial) probes `/dev/ttyUSB*` with
-`AT, ATI, AT+CGMM, AT+CPIN?, AT+CREG?, AT+CEREG?, AT+CGATT?, AT+CGDCONT?`. Flags:
-`-p PORT`, `-b BAUD`, `--all-baud` (9600/115200/921600). Reminds to stop ModemManager
-if the port is busy.
+Files: `components/net_lte/*`, `components/telemetry_uplink/*`, SoftAP UI/API wiring.
 
 ---
 

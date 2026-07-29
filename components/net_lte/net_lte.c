@@ -462,6 +462,234 @@ esp_err_t net_lte_reconnect(void)
     return net_lte_start();
 }
 
+static esp_err_t at_wait_token_locked(char *resp, size_t resp_len, int timeout_ms,
+                                      const char *token)
+{
+    size_t used = 0;
+    if (resp && resp_len) {
+        resp[0] = '\0';
+    }
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    while (xTaskGetTickCount() < deadline) {
+        uint8_t ch;
+        int got = uart_read_bytes(CONFIG_NET_LTE_UART_PORT, &ch, 1, pdMS_TO_TICKS(50));
+        if (got <= 0) {
+            continue;
+        }
+        if (resp && used + 1 < resp_len) {
+            resp[used++] = (char)ch;
+            resp[used] = '\0';
+        }
+        if (resp && token && strstr(resp, token) != NULL) {
+            return ESP_OK;
+        }
+        if (resp && strstr(resp, "ERROR") != NULL) {
+            return ESP_FAIL;
+        }
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t ensure_pdp_locked(char *resp, size_t resp_len)
+{
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "AT+QICSGP=1,1,\"%s\",\"\",\"\",0", CONFIG_NET_LTE_APN);
+    at_transact_locked(cmd, resp, resp_len, 3000);
+
+    esp_err_t act = at_transact_locked("AT+QIACT=1", resp, resp_len, 30000);
+    if (act != ESP_OK || strstr(resp, "ERROR") != NULL) {
+        /* Already active is fine on many firmwares. */
+        if (strstr(resp, "ERROR") != NULL) {
+            ESP_LOGW(TAG, "QIACT: %s", resp);
+        }
+    }
+
+    if (at_transact_locked("AT+QIACT?", resp, resp_len, 5000) == ESP_OK) {
+        char *first = strchr(resp, '"');
+        if (first) {
+            first++;
+            size_t i = 0;
+            while (*first && *first != '"' && i + 1 < sizeof(s_status.ip)) {
+                s_status.ip[i++] = *first++;
+            }
+            s_status.ip[i] = '\0';
+            if (i > 0) {
+                s_status.ip_up = true;
+                s_status.link_up = true;
+                return ESP_OK;
+            }
+        }
+    }
+    return s_status.ip_up ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t http_set_url_locked(const char *url, char *resp, size_t resp_len)
+{
+    size_t url_len = strlen(url);
+    char cmd[48];
+
+    /* Drain then send URL length command; wait for CONNECT. */
+    uint8_t drain[64];
+    while (uart_read_bytes(CONFIG_NET_LTE_UART_PORT, drain, sizeof(drain), 0) > 0) {
+    }
+    int n = snprintf(cmd, sizeof(cmd), "AT+QHTTPURL=%u,80\r", (unsigned)url_len);
+    if (n <= 0 || n >= (int)sizeof(cmd)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (uart_write_bytes(CONFIG_NET_LTE_UART_PORT, cmd, n) != n) {
+        return ESP_FAIL;
+    }
+    if (at_wait_token_locked(resp, resp_len, 80000, "CONNECT") != ESP_OK) {
+        return ESP_FAIL;
+    }
+    if ((size_t)uart_write_bytes(CONFIG_NET_LTE_UART_PORT, url, url_len) != url_len) {
+        return ESP_FAIL;
+    }
+    return at_wait_token_locked(resp, resp_len, 80000, "OK");
+}
+
+esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (url == NULL || body == NULL || url[0] == '\0') {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "invalid args");
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_uart_ready || s_uart_mutex == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "UART not ready");
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(120000)) != pdTRUE) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "modem busy");
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    char resp[512];
+    esp_err_t rc = ESP_FAIL;
+
+    if (at_transact_locked("AT", resp, sizeof(resp), 1000) != ESP_OK ||
+        strstr(resp, "OK") == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "AT fail");
+        }
+        goto done;
+    }
+
+    if (ensure_pdp_locked(resp, sizeof(resp)) != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "PDP/IP fail");
+        }
+        goto done;
+    }
+
+    at_transact_locked("AT+QHTTPCFG=\"contextid\",1", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QHTTPCFG=\"sslctxid\",1", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QSSLCFG=\"sslversion\",1,4", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QSSLCFG=\"seclevel\",1,0", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QSSLCFG=\"sni\",1,1", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QHTTPCFG=\"requestheader\",0", resp, sizeof(resp), 3000);
+    /* contenttype 1 = application/json on Quectel HTTP(S) */
+    at_transact_locked("AT+QHTTPCFG=\"contenttype\",1", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QHTTPCFG=\"responseheader\",0", resp, sizeof(resp), 3000);
+
+    if (http_set_url_locked(url, resp, sizeof(resp)) != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPURL fail");
+        }
+        goto done;
+    }
+
+    size_t body_len = strlen(body);
+    char post_cmd[48];
+    int pn = snprintf(post_cmd, sizeof(post_cmd), "AT+QHTTPPOST=%u,80,80\r",
+                      (unsigned)body_len);
+    uint8_t drain[64];
+    while (uart_read_bytes(CONFIG_NET_LTE_UART_PORT, drain, sizeof(drain), 0) > 0) {
+    }
+    if (uart_write_bytes(CONFIG_NET_LTE_UART_PORT, post_cmd, pn) != pn) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPPOST write fail");
+        }
+        goto done;
+    }
+    if (at_wait_token_locked(resp, sizeof(resp), 80000, "CONNECT") != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPPOST no CONNECT");
+        }
+        goto done;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if ((size_t)uart_write_bytes(CONFIG_NET_LTE_UART_PORT, body, body_len) != body_len) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "body write fail");
+        }
+        goto done;
+    }
+
+    /* Collect until +QHTTPPOST URC or timeout. */
+    char urc[384];
+    at_collect_locked(urc, sizeof(urc), 90000);
+    const char *p = strstr(urc, "+QHTTPPOST:");
+    if (p == NULL) {
+        p = strstr(resp, "+QHTTPPOST:");
+    }
+    if (p == NULL) {
+        /* Sometimes status arrives late after OK — one more short collect. */
+        at_collect_locked(urc, sizeof(urc), 5000);
+        p = strstr(urc, "+QHTTPPOST:");
+    }
+    if (p == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "no QHTTPPOST URC");
+        }
+        goto done;
+    }
+
+    int err = -1;
+    int status = 0;
+    int rlen = 0;
+    if (sscanf(p, "+QHTTPPOST: %d,%d,%d", &err, &status, &rlen) < 2) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "bad QHTTPPOST parse");
+        }
+        goto done;
+    }
+    if (out) {
+        out->http_status = status;
+    }
+    if (err == 0 && status >= 200 && status < 300) {
+        rc = ESP_OK;
+        strncpy(s_status.last_error, "HTTP POST OK", sizeof(s_status.last_error) - 1);
+        if (out) {
+            out->error[0] = '\0';
+        }
+    } else {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "HTTP err=%d status=%d", err, status);
+        }
+        snprintf(s_status.last_error, sizeof(s_status.last_error),
+                 "HTTP POST fail status=%d", status);
+        rc = ESP_FAIL;
+    }
+
+    /* Best-effort drain response body so next call starts clean. */
+    at_transact_locked("AT+QHTTPREAD=80", resp, sizeof(resp), 5000);
+
+done:
+    xSemaphoreGive(s_uart_mutex);
+    ESP_LOGI(TAG, "http_post rc=%s status=%d", esp_err_to_name(rc),
+             out ? out->http_status : -1);
+    return rc;
+}
+
 #else /* !CONFIG_NET_LTE_ENABLE */
 
 esp_err_t net_lte_start(void)
@@ -495,6 +723,17 @@ esp_err_t net_lte_selftest(char *report, size_t len)
 
 esp_err_t net_lte_reconnect(void)
 {
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out)
+{
+    (void)url;
+    (void)body;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->error, sizeof(out->error), "CONFIG_NET_LTE_ENABLE=n");
+    }
     return ESP_ERR_NOT_SUPPORTED;
 }
 
