@@ -20,7 +20,7 @@ int main(void)
     snap.poller_status = "on";
     snap.cmds_ok = 143;
 
-    /* Missing speed must be null + speed_ok false (never invent 255). */
+    /* Missing speed: keys omitted (schema rejects null) + speed_ok false. */
     snap.speed.valid = false;
 
     snap.rpm.valid = true;
@@ -33,13 +33,16 @@ int main(void)
     int n = uplink_payload_build(&snap, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"schemaId\":\"1087\"") != NULL);
-    assert(strstr(buf, "\"speed_kmh\":null") != NULL);
+    assert(strstr(buf, "null") == NULL);            /* schema forbids null */
+    assert(strstr(buf, "\"speed_kmh\"") == NULL);   /* omitted entirely */
+    assert(strstr(buf, "\"speed_raw_hex\"") == NULL);
+    assert(strstr(buf, "\"speed_age_ms\"") == NULL);
     assert(strstr(buf, "\"speed_ok\":false") != NULL);
-    assert(strstr(buf, "\"rpm\":779.5") != NULL || strstr(buf, "\"rpm\":779.5") != NULL);
+    assert(strstr(buf, "\"rpm\":779.5") != NULL);
     assert(strstr(buf, "\"rpm_ok\":true") != NULL);
     assert(strstr(buf, "255") == NULL);
 
-    /* Stale speed (ok but old) must also be null. */
+    /* Stale speed (ok but old) must also be omitted. */
     snap.speed.valid = true;
     snap.speed.ok = true;
     snap.speed.value = 255;
@@ -47,7 +50,7 @@ int main(void)
     snprintf(snap.speed.raw, sizeof(snap.speed.raw), "%s", "410DFF");
     n = uplink_payload_build(&snap, buf, sizeof(buf));
     assert(n > 0);
-    assert(strstr(buf, "\"speed_kmh\":null") != NULL);
+    assert(strstr(buf, "\"speed_kmh\"") == NULL);
     assert(strstr(buf, "\"speed_ok\":false") != NULL);
 
     /* Fresh parked speed 0 is valid. */

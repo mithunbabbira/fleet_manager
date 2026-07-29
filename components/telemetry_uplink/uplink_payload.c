@@ -72,46 +72,26 @@ static int append_json_str(char *out, size_t out_len, size_t *off, const char *s
     return append(out, out_len, off, "\"");
 }
 
+/* The schema rejects JSON null ("expected type: Number, found: Null"), so
+ * stale/missing PIDs OMIT the value/raw/age keys and only send <ok>:false. */
 static int append_pid_fields(char *out, size_t out_len, size_t *off,
                              const char *num_key, const char *raw_key,
                              const char *age_key, const char *ok_key,
                              const uplink_pid_view_t *p, bool raw_is_string)
 {
-    if (appendf(out, out_len, off, ",\"%s\":", num_key) != 0) {
-        return -1;
-    }
+    (void)raw_is_string;
     if (uplink_pid_is_fresh_ok(p)) {
-        if (appendf(out, out_len, off, "%.4g", p->value) != 0) {
+        if (appendf(out, out_len, off, ",\"%s\":%.4g", num_key, p->value) != 0) {
             return -1;
         }
-    } else if (append(out, out_len, off, "null") != 0) {
-        return -1;
-    }
-
-    if (appendf(out, out_len, off, ",\"%s\":", raw_key) != 0) {
-        return -1;
-    }
-    if (uplink_pid_is_fresh_ok(p)) {
-        if (raw_is_string) {
-            if (append_json_str(out, out_len, off, p->raw) != 0) {
-                return -1;
-            }
-        } else if (append_json_str(out, out_len, off, p->raw) != 0) {
+        if (appendf(out, out_len, off, ",\"%s\":", raw_key) != 0 ||
+            append_json_str(out, out_len, off, p->raw) != 0) {
             return -1;
         }
-    } else if (append(out, out_len, off, "null") != 0) {
-        return -1;
-    }
-
-    if (appendf(out, out_len, off, ",\"%s\":", age_key) != 0) {
-        return -1;
-    }
-    if (uplink_pid_is_fresh_ok(p)) {
-        if (appendf(out, out_len, off, "%u", (unsigned)p->age_ms) != 0) {
+        if (appendf(out, out_len, off, ",\"%s\":%u", age_key,
+                    (unsigned)p->age_ms) != 0) {
             return -1;
         }
-    } else if (append(out, out_len, off, "null") != 0) {
-        return -1;
     }
 
     if (appendf(out, out_len, off, ",\"%s\":%s", ok_key,

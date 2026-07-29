@@ -65,7 +65,7 @@ static void set_last(bool ok, bool skipped, int http_status, const char *reason,
 static void cfg_defaults(telemetry_uplink_config_t *c)
 {
     memset(c, 0, sizeof(*c));
-    c->enabled = false;
+    c->enabled = true; /* fleet device: uplink on unless explicitly disabled */
     c->interval_s = 5;
     snprintf(c->device_id, sizeof(c->device_id), "%s", "fleet-demo-001");
     snprintf(c->node_id, sizeof(c->node_id), "%s", "esp32c6-01");

@@ -596,8 +596,9 @@ esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_resu
     at_transact_locked("AT+QSSLCFG=\"seclevel\",1,0", resp, sizeof(resp), 3000);
     at_transact_locked("AT+QSSLCFG=\"sni\",1,1", resp, sizeof(resp), 3000);
     at_transact_locked("AT+QHTTPCFG=\"requestheader\",0", resp, sizeof(resp), 3000);
-    /* contenttype 1 = application/json on Quectel HTTP(S) */
-    at_transact_locked("AT+QHTTPCFG=\"contenttype\",1", resp, sizeof(resp), 3000);
+    /* EC200U content types: 0=urlencoded 1=text/plain 2=octet-stream
+     * 3=multipart 4=application/json (1 caused HTTP 415 from the API). */
+    at_transact_locked("AT+QHTTPCFG=\"contenttype\",4", resp, sizeof(resp), 3000);
     at_transact_locked("AT+QHTTPCFG=\"responseheader\",0", resp, sizeof(resp), 3000);
 
     if (http_set_url_locked(url, resp, sizeof(resp)) != ESP_OK) {
@@ -634,9 +635,17 @@ esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_resu
         goto done;
     }
 
-    /* Collect until +QHTTPPOST URC or timeout. */
+    /* Wait for the +QHTTPPOST URC (arrives in seconds; don't burn the full
+     * window like a fixed collect would), then grab the status digits that
+     * follow the token on the same line. */
     char urc[384];
-    at_collect_locked(urc, sizeof(urc), 90000);
+    at_wait_token_locked(urc, sizeof(urc), 90000, "+QHTTPPOST:");
+    {
+        char tail[64];
+        at_collect_locked(tail, sizeof(tail), 300);
+        size_t used = strlen(urc);
+        snprintf(urc + used, sizeof(urc) - used, "%s", tail);
+    }
     const char *p = strstr(urc, "+QHTTPPOST:");
     if (p == NULL) {
         p = strstr(resp, "+QHTTPPOST:");
