@@ -3,7 +3,14 @@
 > Purpose: give any engineer or LLM enough context to continue this project without
 > re-reading the whole tree. Read this first, then dive into the files it references.
 >
-> Last updated: 2026-07-23. Keep this file current when architecture or WIP changes.
+> Last updated: 2026-07-29. Keep this file current when architecture or WIP changes.
+>
+> **Branch note (`feature/mcp2515-can`):** this branch replaces the BLE ELM327
+> data path with a direct MCP2515 CAN transport (`components/can_obd`, SPI on
+> GPIO 20-23/14, protocol autodetect 11/29-bit x 500/250 kbit persisted in NVS).
+> `obd_poller` + `telemetry_uplink` now use `can_obd`; BLE stays compiled but idle.
+> Validated in-car 2026-07-29 (ISO 15765-4 CAN11/500, live rpm/speed/coolant/throttle).
+> See `docs/superpowers/specs/2026-07-29-mcp2515-can-obd-design.md`.
 
 ---
 

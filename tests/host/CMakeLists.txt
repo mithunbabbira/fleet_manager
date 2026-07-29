@@ -27,7 +27,16 @@ target_include_directories(test_uplink_payload PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
 )
 
+add_executable(test_obd_isotp
+    test_obd_isotp.c
+    ${CMAKE_SOURCE_DIR}/../../components/can_obd/obd_isotp.c
+)
+target_include_directories(test_obd_isotp PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../components/can_obd/include
+)
+
 enable_testing()
 add_test(NAME test_cmd_policy COMMAND test_cmd_policy)
 add_test(NAME test_obd_codec COMMAND test_obd_codec)
 add_test(NAME test_uplink_payload COMMAND test_uplink_payload)
+add_test(NAME test_obd_isotp COMMAND test_obd_isotp)

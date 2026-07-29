@@ -1,8 +1,7 @@
 #include "telemetry_uplink.h"
 #include "uplink_payload.h"
 
-#include "ble_elm.h"
-#include "elm327_client.h"
+#include "can_obd.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -217,12 +216,6 @@ static bool any_fresh_ok_locked(uint64_t now)
     return false;
 }
 
-static void format_addr(const uint8_t addr[6], char *out, size_t len)
-{
-    snprintf(out, len, "%02X:%02X:%02X:%02X:%02X:%02X",
-             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-}
-
 static esp_err_t attempt_once(void)
 {
     telemetry_uplink_config_t cfg;
@@ -249,12 +242,11 @@ static esp_err_t attempt_once(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    bool ble = ble_elm_is_connected();
-    bool elm = elm327_client_is_ready();
+    bool can_ready = can_obd_is_ready();
     bool poller = obd_poller_is_enabled();
-    if (!ble || !elm || !poller) {
+    if (!can_ready || !poller) {
         set_last(false, true, 0, "not ready",
-                 !ble ? "ble down" : (!elm ? "elm not ready" : "poller paused"));
+                 !can_ready ? "can link down" : "poller paused");
         return ESP_ERR_INVALID_STATE;
     }
     if (!have_fresh) {
@@ -262,30 +254,20 @@ static esp_err_t attempt_once(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ble_bond_t bond;
-    memset(&bond, 0, sizeof(bond));
-    profile_store_get_bond(&bond);
-    if (bond.addr_set) {
-        format_addr(bond.addr, snap.ble_peer_address, sizeof(snap.ble_peer_address));
-    } else {
-        uint8_t peer[6] = {0};
-        if (ble_elm_get_peer_addr(peer) == ESP_OK) {
-            format_addr(peer, snap.ble_peer_address, sizeof(snap.ble_peer_address));
-        }
-    }
-    snprintf(snap.adapter_name, sizeof(snap.adapter_name), "%s",
-             bond.name[0] ? bond.name : "ELM327");
+    /* Schema keys are kept; BLE-era fields carry the CAN link identity. */
+    snprintf(snap.ble_peer_address, sizeof(snap.ble_peer_address), "%s", "-");
+    snprintf(snap.adapter_name, sizeof(snap.adapter_name), "%s", "MCP2515");
 
     obd_profile_t profile;
     memset(&profile, 0, sizeof(profile));
     if (profile_store_get_active(&profile) == ESP_OK) {
         snprintf(snap.obd_profile, sizeof(snap.obd_profile), "%s", profile.name);
     }
-    snprintf(snap.obd_protocol, sizeof(snap.obd_protocol), "%s", "unknown");
+    can_obd_get_protocol(snap.obd_protocol, sizeof(snap.obd_protocol));
 
     snap.uptime_seconds = (uint32_t)sys_runtime_metric_get("uptime_s");
-    snap.ble_connected = ble;
-    snap.elm_ready = elm;
+    snap.ble_connected = can_ready; /* schema compat: mirrors CAN link state */
+    snap.elm_ready = can_ready;
     snap.poller_status = poller ? "on" : "paused";
     snap.cmds_ok = sys_runtime_metric_get("cmds_ok");
     snap.cmds_fail = sys_runtime_metric_get("cmds_fail");

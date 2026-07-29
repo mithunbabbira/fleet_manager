@@ -1,7 +1,7 @@
 #include "obd_poller.h"
 
+#include "can_obd.h"
 #include "cmd_policy.h"
-#include "elm327_client.h"
 #include "obd_codec.h"
 #include "profile_store.h"
 #include "sdkconfig.h"
@@ -191,7 +191,7 @@ static esp_err_t run_policy_and_transact(const char *cmd, char *resp, size_t res
         timeout_ms = CONFIG_ELM_CMD_TIMEOUT_MS;
     }
 
-    esp_err_t err = elm327_client_transact(cmd, resp, resp_len, timeout_ms);
+    esp_err_t err = can_obd_transact(cmd, resp, resp_len, timeout_ms);
     if (err == ESP_OK) {
         sys_runtime_metric_inc("cmds_ok");
     } else {
@@ -313,7 +313,7 @@ static void poller_task(void *arg)
             continue;
         }
 
-        if (!elm327_client_is_ready()) {
+        if (!can_obd_is_ready()) {
             if (xQueueReceive(s_raw_queue, &raw, pdMS_TO_TICKS(500)) == pdTRUE) {
                 handle_raw_request(&raw);
             }
@@ -362,6 +362,21 @@ static void poller_task(void *arg)
 
             if (xQueueReceive(s_raw_queue, &raw, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
                 handle_raw_request(&raw);
+            }
+            continue;
+        }
+
+        /* ELM-era AT items (e.g. ATRV voltage) have no direct-CAN equivalent. */
+        if ((item.cmd[0] == 'A' || item.cmd[0] == 'a') &&
+            (item.cmd[1] == 'T' || item.cmd[1] == 't')) {
+            static bool s_warned_at;
+            if (!s_warned_at) {
+                ESP_LOGW(TAG, "skipping AT profile items (no ELM327 on CAN transport)");
+                s_warned_at = true;
+            }
+            if (xSemaphoreTake(s_profile_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                s_last_fire_ms[item_idx] = now_ms();
+                xSemaphoreGive(s_profile_mutex);
             }
             continue;
         }

@@ -1,4 +1,5 @@
 #include "ble_elm.h"
+#include "can_obd.h"
 #include "elm327_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -23,69 +24,27 @@ static const char *TAG = "app";
 #define BONDED_BOOT_WAIT_MS    15000
 #define BONDED_BOOT_POLL_MS    200
 
-static void format_addr(const uint8_t addr[6], char *out, size_t len)
-{
-    snprintf(out, len, "%02X:%02X:%02X:%02X:%02X:%02X",
-             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-}
-
-static void bonded_boot_init_task(void *arg)
+/* Enable profile polling as soon as the CAN link finds an ECU; pause it on
+ * link loss so can_obd can reprobe protocols without poll traffic. */
+static void can_boot_task(void *arg)
 {
     (void)arg;
+    bool was_ready = false;
 
-    ESP_LOGI(TAG, "bonded boot: waiting for BLE transport ready (up to %d ms)...",
-             BONDED_BOOT_WAIT_MS);
-
-    int waited_ms = 0;
-    while (!elm327_client_is_ready() && waited_ms < BONDED_BOOT_WAIT_MS) {
+    for (;;) {
+        bool ready = can_obd_is_ready();
+        if (ready && !was_ready) {
+            char proto[48];
+            can_obd_get_protocol(proto, sizeof(proto));
+            ESP_LOGI(TAG, "CAN link up (%s); enabling poller", proto);
+            obd_poller_set_enabled(true);
+        } else if (!ready && was_ready) {
+            ESP_LOGW(TAG, "CAN link down; pausing poller");
+            obd_poller_set_enabled(false);
+        }
+        was_ready = ready;
         vTaskDelay(pdMS_TO_TICKS(BONDED_BOOT_POLL_MS));
-        waited_ms += BONDED_BOOT_POLL_MS;
     }
-
-    if (!elm327_client_is_ready()) {
-        ESP_LOGW(TAG, "bonded boot: transport not ready after %d ms — clearing stale peer",
-                 BONDED_BOOT_WAIT_MS);
-        ble_elm_clear_peer();
-        ble_bond_t empty;
-        memset(&empty, 0, sizeof(empty));
-        profile_store_set_bond(&empty);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "bonded boot: transport ready after %d ms", waited_ms);
-
-    obd_profile_t profile;
-    esp_err_t err = profile_store_get_active(&profile);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "bonded boot: failed to load active profile: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
-    }
-
-    if (profile.init_at_count <= 0) {
-        ESP_LOGI(TAG, "bonded boot: profile \"%s\" has no init sequence; skipping",
-                 profile.name);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "bonded boot: running init sequence for profile \"%s\" (%d cmds)",
-             profile.name, profile.init_at_count);
-    err = elm327_client_run_init_sequence(profile.init_at, profile.init_at_count);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "bonded boot: init sequence OK");
-        obd_poller_set_enabled(true);
-        /* Kick protocol discovery with a long-timeout PID support query. */
-        char resp[128];
-        esp_err_t pid_err = elm327_client_transact("0100", resp, sizeof(resp), 15000);
-        ESP_LOGI(TAG, "bonded boot: 0100 -> %s (%s)", resp, esp_err_to_name(pid_err));
-    } else {
-        ESP_LOGE(TAG, "bonded boot: init sequence failed: %s", esp_err_to_name(err));
-        obd_poller_set_enabled(false);
-    }
-
-    vTaskDelete(NULL);
 }
 
 void app_main(void)
@@ -134,11 +93,13 @@ void app_main(void)
         }
     }
 
+    /* BLE/ELM stay initialized (serial + HTTP transports reference them) but
+     * this branch never connects: OBD data comes from the MCP2515 CAN link. */
     ESP_ERROR_CHECK(ble_elm_init());
-    ESP_LOGI(TAG, "ble_elm ready");
+    ESP_LOGI(TAG, "ble_elm ready (idle on CAN branch)");
 
     ESP_ERROR_CHECK(elm327_client_init());
-    ESP_LOGI(TAG, "elm327_client ready");
+    ESP_LOGI(TAG, "elm327_client ready (idle on CAN branch)");
 
     ESP_ERROR_CHECK(transport_serial_start());
     ESP_LOGI(TAG, "transport_serial started");
@@ -146,39 +107,24 @@ void app_main(void)
     ESP_ERROR_CHECK(transport_http_start());
     ESP_LOGI(TAG, "transport_http started");
 
-    ble_bond_t bond;
-    if (profile_store_get_bond(&bond) == ESP_OK && bond.addr_set) {
-        char addr_str[18];
-        format_addr(bond.addr, addr_str, sizeof(addr_str));
-        ESP_LOGI(TAG, "bonded boot: connecting to saved device %s (%s)",
-                 bond.name[0] != '\0' ? bond.name : "ELM327", addr_str);
-
-        err = ble_elm_connect_addr(bond.addr);
-        if (err == ESP_OK) {
-            elm327_client_set_transport(ble_elm_get_transport());
-            BaseType_t created = xTaskCreate(bonded_boot_init_task, "bonded_boot",
-                                             BONDED_BOOT_TASK_STACK, NULL,
-                                             BONDED_BOOT_TASK_PRIO, NULL);
-            if (created != pdPASS) {
-                ESP_LOGE(TAG, "bonded boot: failed to start init helper task");
-            }
-        } else {
-            ESP_LOGE(TAG, "bonded boot: connect failed: %s", esp_err_to_name(err));
-        }
+    err = can_obd_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "can_obd_init: %s — check MCP2515 wiring/power",
+                 esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "bonded boot: no saved bond; use serial or HTTP to select a device");
+        ESP_ERROR_CHECK(can_obd_start());
+        ESP_LOGI(TAG, "can_obd started (protocol autodetect)");
     }
 
     ESP_ERROR_CHECK(obd_poller_start());
     ESP_LOGI(TAG, "obd_poller started");
 
-    /* Auto-reconnect only after a live session exists. Enabling it against a
-     * stale random address blocks BLE scan (EALREADY) and wastes airtime. */
-    if (profile_store_get_bond(&bond) == ESP_OK && bond.addr_set &&
-        ble_elm_is_connected()) {
-        ESP_ERROR_CHECK(ble_elm_start_auto_reconnect());
-        ESP_LOGI(TAG, "ble_elm auto-reconnect enabled");
-    } else {
-        ESP_LOGI(TAG, "ble_elm auto-reconnect deferred until select/connect succeeds");
+    if (err == ESP_OK) {
+        BaseType_t created = xTaskCreate(can_boot_task, "can_boot",
+                                         BONDED_BOOT_TASK_STACK, NULL,
+                                         BONDED_BOOT_TASK_PRIO, NULL);
+        if (created != pdPASS) {
+            ESP_LOGE(TAG, "failed to start can_boot task");
+        }
     }
 }
