@@ -127,7 +127,7 @@ static esp_err_t start_httpd(void)
     config.lru_purge_enable = true;
     /* Default 4KB stack overflows on /api/status + cJSON (phone SoftAP crash). */
     config.stack_size = 12288;
-    /* Protocol auto-detect (ATSP0 + lock) can take two long ELM inits. */
+    /* Some raw OBD probes (e.g. protocol search on link loss) can take a while. */
     config.recv_wait_timeout = 45;
     config.send_wait_timeout = 45;
 
