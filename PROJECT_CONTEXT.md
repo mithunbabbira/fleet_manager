@@ -3,12 +3,14 @@
 > Purpose: give any engineer or LLM enough context to continue this project without
 > re-reading the whole tree. Read this first, then dive into the files it references.
 >
-> Last updated: 2026-07-29. Keep this file current when architecture or WIP changes.
+> Last updated: 2026-07-31. Keep this file current when architecture or WIP changes.
 >
 > **Branch note (`feature/mcp2515-can`):** this branch replaces the BLE ELM327
 > data path with a direct MCP2515 CAN transport (`components/can_obd`, SPI on
 > GPIO 20-23/14, protocol autodetect 11/29-bit x 500/250 kbit persisted in NVS).
-> `obd_poller` + `telemetry_uplink` now use `can_obd`; BLE stays compiled but idle.
+> `obd_poller` + `telemetry_uplink` now use `can_obd`. Bluetooth/NimBLE is disabled
+> in `sdkconfig.defaults` (BLE stack removal in progress; see
+> `docs/superpowers/specs/2026-07-31-ble-elm-hard-delete-design.md`).
 > Validated in-car 2026-07-29 (ISO 15765-4 CAN11/500, live rpm/speed/coolant/throttle).
 > See `docs/superpowers/specs/2026-07-29-mcp2515-can-obd-design.md`.
 
@@ -75,11 +77,11 @@ Covers `cmd_policy` (`test_cmd_policy.c`) and `obd_codec` (`test_obd_codec.c`).
 Key `sdkconfig.defaults` values:
 - `CONFIG_IDF_TARGET="esp32c6"`, 4 MB flash, custom `partitions.csv`.
 - `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` (no UART0 console).
-- NimBLE central+observer, SoftAP support, Task WDT 10 s, main stack 8192.
-- `CONFIG_ELM_CMD_TIMEOUT_MS=12000`, `CONFIG_ELM_BLE_SCAN_MS=12000`.
+- Bluetooth disabled (`# CONFIG_BT_ENABLED is not set`), SoftAP support, Task WDT 10 s, main stack 8192.
+- `CONFIG_ELM_CMD_TIMEOUT_MS=12000`.
 - `CONFIG_NET_LTE_ENABLE=y`, `CONFIG_NET_LTE_APN="airtelgprs.com"`.
 
-Kconfig menus: `main/Kconfig.projbuild` (SoftAP creds, ELM timeouts, BLE scan) and
+Kconfig menus: `main/Kconfig.projbuild` (SoftAP creds, OBD command timeout) and
 `components/net_lte/Kconfig` (UART port/pins/baud, APN).
 
 Partitions (`partitions.csv`): `nvs`, `otadata`, `phy_init`, `factory` @0x20000

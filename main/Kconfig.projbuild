@@ -1,4 +1,4 @@
-menu "ELM327 Bridge"
+menu "Fleet telematics node"
 
     config ELM_SOFTAP_SSID
         string "SoftAP SSID"
@@ -15,11 +15,6 @@ menu "ELM327 Bridge"
         default 12000
         range 500 30000
         help
-            Auto protocol search (ATSP0 + first PID) often needs 5-15s.
-
-    config ELM_BLE_SCAN_MS
-        int "BLE scan duration (ms)"
-        default 10000
-        range 1000 30000
+            OBD command timeout (ms). Auto protocol search often needs 5-15s.
 
 endmenu
