@@ -1,6 +1,4 @@
-#include "ble_elm.h"
 #include "can_obd.h"
-#include "elm327_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -92,14 +90,6 @@ void app_main(void)
             ESP_LOGI(TAG, "telemetry_uplink ready");
         }
     }
-
-    /* BLE/ELM stay initialized (serial + HTTP transports reference them) but
-     * this branch never connects: OBD data comes from the MCP2515 CAN link. */
-    ESP_ERROR_CHECK(ble_elm_init());
-    ESP_LOGI(TAG, "ble_elm ready (idle on CAN branch)");
-
-    ESP_ERROR_CHECK(elm327_client_init());
-    ESP_LOGI(TAG, "elm327_client ready (idle on CAN branch)");
 
     ESP_ERROR_CHECK(transport_serial_start());
     ESP_LOGI(TAG, "transport_serial started");
