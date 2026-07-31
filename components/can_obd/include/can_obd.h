@@ -1,7 +1,6 @@
 #pragma once
 /*
- * Direct-CAN OBD-II transport (MCP2515), drop-in replacement for the
- * elm327_client text API on the feature/mcp2515-can branch.
+ * Direct-CAN OBD-II transport for the MCP2515 on feature/mcp2515-can.
  *
  * Protocol (bitrate + id width) is NOT hardcoded: by default the link
  * supervision task sweeps ISO 15765-4 candidates until an ECU answers
@@ -27,8 +26,7 @@ bool can_obd_is_ready(void);
 
 /*
  * Send an OBD command as hex text ("010C", "0902", "03") and return the
- * response payload as uppercase hex ("410C0C30") — same contract as
- * elm327_client_transact.
+ * response payload as uppercase hex ("410C0C30").
  *
  * ESP_ERR_NOT_SUPPORTED  AT commands (no ELM chip anymore)
  * ESP_ERR_INVALID_STATE  link not ready

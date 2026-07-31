@@ -36,10 +36,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
-/* esp_netif_init()/esp_event_loop_create_default() may already have been
- * called by another subsystem (e.g. NimBLE's controller bring-up path on
- * some IDF versions); ESP_ERR_INVALID_STATE from either just means "already
- * done" and is not a real failure here. */
+/* ESP_ERR_INVALID_STATE from either initializer means another subsystem
+ * already completed the shared network/event-loop setup. */
 static esp_err_t init_netif_and_event_loop(void)
 {
     esp_err_t err = esp_netif_init();

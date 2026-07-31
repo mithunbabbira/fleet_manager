@@ -53,7 +53,7 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
-    ESP_LOGI(TAG, "ELM327 ESP32-C6 bridge boot");
+    ESP_LOGI(TAG, "ESP32-C6 fleet telematics node boot");
 
     ESP_ERROR_CHECK(sys_runtime_init());
     ESP_LOGI(TAG, "sys_runtime ready");
