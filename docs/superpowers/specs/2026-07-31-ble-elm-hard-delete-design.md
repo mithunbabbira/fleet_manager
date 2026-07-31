@@ -1,6 +1,6 @@
 # BLE/ELM327 Hard Delete (size trim for OTA headroom)
 
-Branch: `feature/mcp2515-can` · Date: 2026-07-31  
+Branch: `feature/mcp2515-can` · Date: 2026-07-31
 Repo: `63idealabs/fleet-telematics-node`
 
 ## Goal
