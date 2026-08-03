@@ -36,3 +36,9 @@ python3 server.py --host 0.0.0.0 --port 8080
 
 1. Set `version` different from the device → reboot / wait for auto-check → downloads once.
 2. Same version → `no_update`.
+
+## Full release runbook
+
+Device URL setup + every-new-version checklist (lab and prod):
+
+`docs/superpowers/specs/2026-08-03-ota-backend-api-requirements.md` (sections 5–8).
