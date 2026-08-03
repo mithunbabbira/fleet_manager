@@ -1,10 +1,13 @@
 # ESP32-C6 Fleet Telematics — Project Context
 
-> Last updated: 2026-07-31 on `feature/mcp2515-can`.
+> Last updated: 2026-08-03 on `feature/mcp2515-can`.
 >
 > The production data path is direct vehicle CAN through MCP2515. Local access is
 > USB Serial/JTAG plus Wi-Fi SoftAP/HTTP, and cloud telemetry uses a Quectel EC200U
 > LTE modem. The retired wireless OBD adapter stack has been deleted.
+>
+> Flash layout is dual-bank OTA (`ota_0` + `ota_1`). Lab manifest + `.bin` host:
+> `tools/ota_dev_server/`. Design: `docs/superpowers/specs/2026-07-31-lte-ota-design.md`.
 
 ## Product
 

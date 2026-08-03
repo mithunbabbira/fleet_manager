@@ -9,6 +9,9 @@ managed_components/
 __pycache__/
 .DS_Store
 tests/host/build/
+examples/**/build/
+examples/**/sdkconfig
 .worktrees/
 .superpowers/
 .cache/
+tools/ota_dev_server/firmware/**/*.bin
