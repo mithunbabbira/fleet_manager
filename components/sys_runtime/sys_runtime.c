@@ -206,6 +206,7 @@ esp_err_t sys_runtime_ota_stub_status(char *buf, size_t len)
     if (!buf || len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    snprintf(buf, len, "{\"status\":\"not_implemented\"}");
+    /* SoftAP OTA lives in fw_ota; use GET /api/ota for live status. */
+    snprintf(buf, len, "{\"status\":\"see_/api/ota\"}");
     return ESP_OK;
 }

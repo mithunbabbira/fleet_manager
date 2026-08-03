@@ -4,6 +4,8 @@
 
 #include "can_obd.h"
 #include "cmd_policy.h"
+#include "fw_ota.h"
+#include "fw_ota_lte.h"
 #include "net_lte.h"
 #include "obd_codec.h"
 #include "obd_poller.h"
@@ -992,6 +994,235 @@ static esp_err_t api_safety_handler(httpd_req_t *req)
     return api_safety_post(req);
 }
 
+/* ---- GET/POST /api/ota ------------------------------------------------------ */
+
+static const char *fw_ota_state_name(fw_ota_state_t st)
+{
+    switch (st) {
+    case FW_OTA_STATE_IDLE: return "idle";
+    case FW_OTA_STATE_WRITING: return "writing";
+    case FW_OTA_STATE_FAILED: return "failed";
+    case FW_OTA_STATE_PENDING_REBOOT: return "pending_reboot";
+    default: return "unknown";
+    }
+}
+
+static esp_err_t api_ota_get(httpd_req_t *req)
+{
+    fw_ota_status_t st;
+    if (fw_ota_get_status(&st) != ESP_OK) {
+        return send_error_json(req, HTTPD_500, "status_failed", NULL);
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "state", fw_ota_state_name(st.state));
+    cJSON_AddStringToObject(root, "error", st.error);
+    cJSON_AddStringToObject(root, "running_partition", st.running_partition);
+    cJSON_AddStringToObject(root, "update_partition", st.update_partition);
+    cJSON_AddStringToObject(root, "fw_version", st.fw_version);
+    cJSON_AddNumberToObject(root, "expected_size", (double)st.expected_size);
+    cJSON_AddNumberToObject(root, "bytes_written", (double)st.bytes_written);
+    cJSON_AddBoolToObject(root, "pending_verify", st.pending_verify);
+    return send_ok_json(req, root);
+}
+
+#define OTA_RECV_CHUNK 4096
+
+static esp_err_t api_ota_post(httpd_req_t *req)
+{
+    if (fw_ota_lte_is_busy() || fw_ota_is_busy()) {
+        return send_error_json(req, "409 Conflict", "busy", "OTA already in progress");
+    }
+
+    char size_hdr[24] = {0};
+    char sha_hdr[72] = {0};
+
+    if (httpd_req_get_hdr_value_str(req, "X-Firmware-Size", size_hdr, sizeof(size_hdr)) != ESP_OK) {
+        return send_error_json(req, HTTPD_400, "missing_header", "X-Firmware-Size required");
+    }
+    if (httpd_req_get_hdr_value_str(req, "X-Firmware-Sha256", sha_hdr, sizeof(sha_hdr)) != ESP_OK) {
+        return send_error_json(req, HTTPD_400, "missing_header", "X-Firmware-Sha256 required");
+    }
+
+    /* Trim whitespace/newlines from sha header */
+    size_t sha_len = strlen(sha_hdr);
+    while (sha_len > 0 && isspace((unsigned char)sha_hdr[sha_len - 1])) {
+        sha_hdr[--sha_len] = '\0';
+    }
+
+    char *end = NULL;
+    unsigned long expected = strtoul(size_hdr, &end, 10);
+    if (end == size_hdr || expected == 0) {
+        return send_error_json(req, HTTPD_400, "bad_size", "X-Firmware-Size invalid");
+    }
+    if (req->content_len > 0 && (size_t)req->content_len != (size_t)expected) {
+        return send_error_json(req, HTTPD_400, "size_mismatch",
+                               "Content-Length does not match X-Firmware-Size");
+    }
+
+    esp_err_t err = fw_ota_begin((size_t)expected, sha_hdr);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_error_json(req, "409 Conflict", "busy", "OTA already in progress");
+    }
+    if (err != ESP_OK) {
+        fw_ota_status_t st;
+        fw_ota_get_status(&st);
+        return send_error_json(req, HTTPD_400, "begin_failed",
+                               st.error[0] ? st.error : esp_err_to_name(err));
+    }
+
+    uint8_t *buf = malloc(OTA_RECV_CHUNK);
+    if (!buf) {
+        fw_ota_abort();
+        return send_error_json(req, HTTPD_500, "no_mem", NULL);
+    }
+
+    size_t remaining = (size_t)expected;
+    while (remaining > 0) {
+        int to_read = (int)((remaining > OTA_RECV_CHUNK) ? OTA_RECV_CHUNK : remaining);
+        int got = httpd_req_recv(req, (char *)buf, to_read);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (got <= 0) {
+            free(buf);
+            fw_ota_abort();
+            return send_error_json(req, HTTPD_500, "recv_failed", "connection closed early");
+        }
+        err = fw_ota_write(buf, (size_t)got);
+        if (err != ESP_OK) {
+            free(buf);
+            fw_ota_status_t st;
+            fw_ota_get_status(&st);
+            return send_error_json(req, HTTPD_500, "write_failed",
+                                   st.error[0] ? st.error : esp_err_to_name(err));
+        }
+        remaining -= (size_t)got;
+    }
+    free(buf);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status", "ok");
+    cJSON_AddStringToObject(root, "message", "verified; rebooting into new partition");
+    esp_err_t send_err = send_ok_json(req, root);
+    if (send_err != ESP_OK) {
+        ESP_LOGW(TAG, "OTA response send failed: %s (still finalizing)", esp_err_to_name(send_err));
+    }
+
+    err = fw_ota_end_and_reboot();
+    /* Only reached on failure */
+    fw_ota_status_t st;
+    fw_ota_get_status(&st);
+    ESP_LOGE(TAG, "fw_ota_end_and_reboot failed: %s (%s)", esp_err_to_name(err), st.error);
+    return ESP_FAIL;
+}
+
+static esp_err_t api_ota_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        return api_ota_get(req);
+    }
+    return api_ota_post(req);
+}
+
+static const char *lte_phase_name(fw_ota_lte_phase_t p)
+{
+    switch (p) {
+    case FW_OTA_LTE_IDLE: return "idle";
+    case FW_OTA_LTE_CHECKING: return "checking";
+    case FW_OTA_LTE_DOWNLOADING: return "downloading";
+    case FW_OTA_LTE_NO_UPDATE: return "no_update";
+    case FW_OTA_LTE_FAILED: return "failed";
+    case FW_OTA_LTE_REBOOTING: return "rebooting";
+    default: return "unknown";
+    }
+}
+
+static esp_err_t api_ota_lte_get(httpd_req_t *req)
+{
+    fw_ota_lte_config_t cfg;
+    fw_ota_lte_status_t st;
+    fw_ota_status_t ost;
+    fw_ota_lte_get_config(&cfg);
+    fw_ota_lte_get_status(&st);
+    fw_ota_get_status(&ost);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "manifest_url", cfg.manifest_url);
+    cJSON_AddStringToObject(root, "channel", cfg.channel);
+    cJSON_AddStringToObject(root, "device_id", cfg.device_id);
+    cJSON_AddBoolToObject(root, "force", cfg.force);
+    cJSON_AddStringToObject(root, "running_fw_version", ost.fw_version);
+    cJSON_AddStringToObject(root, "running_partition", ost.running_partition);
+    cJSON_AddStringToObject(root, "phase", lte_phase_name(st.phase));
+    cJSON_AddStringToObject(root, "error", st.error);
+    cJSON_AddStringToObject(root, "manifest_version", st.manifest_version);
+    cJSON_AddStringToObject(root, "applied_version", st.applied_version);
+    cJSON_AddNumberToObject(root, "http_status", st.http_status);
+    cJSON_AddNumberToObject(root, "bytes_downloaded", (double)st.bytes_downloaded);
+    cJSON_AddBoolToObject(root, "busy", fw_ota_lte_is_busy() || fw_ota_is_busy());
+    return send_ok_json(req, root);
+}
+
+static esp_err_t api_ota_lte_post(httpd_req_t *req)
+{
+    char body[512];
+    int r = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (r <= 0) {
+        return send_error_json(req, HTTPD_400, "bad_request", "empty body");
+    }
+    body[r] = '\0';
+    cJSON *json = cJSON_Parse(body);
+    if (!json) {
+        return send_error_json(req, HTTPD_400, "invalid_json", NULL);
+    }
+    fw_ota_lte_config_t cfg;
+    fw_ota_lte_get_config(&cfg);
+    cJSON *u = cJSON_GetObjectItem(json, "manifest_url");
+    cJSON *ch = cJSON_GetObjectItem(json, "channel");
+    cJSON *did = cJSON_GetObjectItem(json, "device_id");
+    cJSON *force = cJSON_GetObjectItem(json, "force");
+    if (cJSON_IsString(u)) {
+        snprintf(cfg.manifest_url, sizeof(cfg.manifest_url), "%s", u->valuestring);
+    }
+    if (cJSON_IsString(ch)) {
+        snprintf(cfg.channel, sizeof(cfg.channel), "%s", ch->valuestring);
+    }
+    if (cJSON_IsString(did)) {
+        snprintf(cfg.device_id, sizeof(cfg.device_id), "%s", did->valuestring);
+    }
+    if (cJSON_IsBool(force)) {
+        cfg.force = cJSON_IsTrue(force);
+    }
+    cJSON_Delete(json);
+    esp_err_t err = fw_ota_lte_set_config(&cfg);
+    if (err != ESP_OK) {
+        return send_error_json(req, HTTPD_500, "save_failed", esp_err_to_name(err));
+    }
+    return api_ota_lte_get(req);
+}
+
+static esp_err_t api_ota_lte_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        return api_ota_lte_get(req);
+    }
+    return api_ota_lte_post(req);
+}
+
+static esp_err_t api_ota_lte_run_post(httpd_req_t *req)
+{
+    esp_err_t err = fw_ota_lte_start_background();
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_error_json(req, "409 Conflict", "busy", "LTE OTA already running");
+    }
+    if (err != ESP_OK) {
+        return send_error_json(req, HTTPD_500, "start_failed", esp_err_to_name(err));
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status", "started");
+    cJSON_AddStringToObject(root, "message", "LTE OTA running in background; poll /api/ota/lte");
+    return send_ok_json(req, root);
+}
+
 /* ---- GET /api/health -------------------------------------------------------- */
 
 static const char *reset_reason_str(esp_reset_reason_t r)
@@ -1068,6 +1299,11 @@ esp_err_t http_api_register(httpd_handle_t server)
         {.uri = "/api/safety", .method = HTTP_GET, .handler = api_safety_handler},
         {.uri = "/api/safety", .method = HTTP_POST, .handler = api_safety_handler},
         {.uri = "/api/health", .method = HTTP_GET, .handler = api_health_get},
+        {.uri = "/api/ota", .method = HTTP_GET, .handler = api_ota_handler},
+        {.uri = "/api/ota", .method = HTTP_POST, .handler = api_ota_handler},
+        {.uri = "/api/ota/lte", .method = HTTP_GET, .handler = api_ota_lte_handler},
+        {.uri = "/api/ota/lte", .method = HTTP_POST, .handler = api_ota_lte_handler},
+        {.uri = "/api/ota/lte/run", .method = HTTP_POST, .handler = api_ota_lte_run_post},
         {.uri = "/", .method = HTTP_GET, .handler = root_get},
     };
 

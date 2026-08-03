@@ -29,7 +29,7 @@ The default profile is `fleet_basic`. The CAN path was validated in-car on
 | MCU | ESP32-C6 Mini, 4 MB flash |
 | CAN | MCP2515 over SPI; GPIO20 MOSI, GPIO21 MISO, GPIO22 SCLK, GPIO23 CS, GPIO14 INT |
 | Console | USB Serial/JTAG, 115200 8N1 |
-| Wi-Fi | SoftAP `ELM327-C6`, password `elm327c6`, UI at `http://192.168.4.1/` |
+| Wi-Fi | SoftAP `Fleet-C6`, password `fleetc6`, UI at `http://192.168.4.1/` |
 | LTE | Quectel EC200U on UART1; GPIO17 TX, GPIO16 RX, 115200 8N1 |
 | APN | `airtelgprs.com` by default |
 

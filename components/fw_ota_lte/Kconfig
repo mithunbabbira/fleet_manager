@@ -1,0 +1,30 @@
+menu "Firmware LTE OTA (fw_ota_lte)"
+
+    config FW_OTA_LTE_AUTO_CHECK
+        bool "Auto-check manifest after LTE is up"
+        default y
+        help
+            After boot, wait for cellular registration then GET the manifest.
+            Repeats every FW_OTA_LTE_AUTO_INTERVAL_H hours. Force is always off
+            for auto checks (SoftAP/serial Force still works for lab).
+
+    config FW_OTA_LTE_DEFAULT_MANIFEST_URL
+        string "Default manifest URL (used when NVS empty)"
+        default "https://d949-2402-e280-210a-4bd-88a5-efd3-8de3-4a38.ngrok-free.app/firmware/manifest"
+        help
+            Lab ngrok URL for now. Replace with CM/prod when ready.
+            SoftAP or serial "ota url" overrides this in NVS.
+
+    config FW_OTA_LTE_AUTO_WAIT_SEC
+        int "Max seconds to wait for LTE registration before first check"
+        range 30 600
+        default 90
+        depends on FW_OTA_LTE_AUTO_CHECK
+
+    config FW_OTA_LTE_AUTO_INTERVAL_H
+        int "Hours between auto OTA checks"
+        range 1 168
+        default 24
+        depends on FW_OTA_LTE_AUTO_CHECK
+
+endmenu

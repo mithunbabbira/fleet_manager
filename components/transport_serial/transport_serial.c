@@ -2,6 +2,8 @@
 
 #include "can_obd.h"
 #include "cmd_policy.h"
+#include "fw_ota.h"
+#include "fw_ota_lte.h"
 #include "net_lte.h"
 #include "obd_poller.h"
 #include "profile_store.h"
@@ -106,7 +108,103 @@ static void cmd_help(void)
         "  unsafe on|off\n"
         "  metrics\n"
         "  lte [reconnect|test]\n"
-        "  uplink [on|off|now]\n");
+        "  uplink [on|off|now]\n"
+        "  ota [status|run|force on|force off|url <url>]\n");
+}
+
+static const char *ota_lte_phase_str(fw_ota_lte_phase_t p)
+{
+    switch (p) {
+    case FW_OTA_LTE_IDLE: return "idle";
+    case FW_OTA_LTE_CHECKING: return "checking";
+    case FW_OTA_LTE_DOWNLOADING: return "downloading";
+    case FW_OTA_LTE_NO_UPDATE: return "no_update";
+    case FW_OTA_LTE_FAILED: return "failed";
+    case FW_OTA_LTE_REBOOTING: return "rebooting";
+    default: return "unknown";
+    }
+}
+
+static void cmd_ota_status(void)
+{
+    fw_ota_status_t ost;
+    fw_ota_lte_status_t lst;
+    fw_ota_lte_config_t cfg;
+    fw_ota_get_status(&ost);
+    fw_ota_lte_get_status(&lst);
+    fw_ota_lte_get_config(&cfg);
+    printf("ota: fw=%s boot=%s next=%s state=%d pending_verify=%s busy=%s\n",
+           ost.fw_version, ost.running_partition, ost.update_partition, (int)ost.state,
+           ost.pending_verify ? "yes" : "no",
+           (fw_ota_is_busy() || fw_ota_lte_is_busy()) ? "yes" : "no");
+    printf("lte_ota: phase=%s manif_ver=%s applied=%s http=%d dl=%u err=\"%s\"\n",
+           ota_lte_phase_str(lst.phase), lst.manifest_version, lst.applied_version,
+           lst.http_status, (unsigned)lst.bytes_downloaded, lst.error);
+    printf("cfg: force=%s channel=%s device_id=%s\n",
+           cfg.force ? "on" : "off", cfg.channel, cfg.device_id);
+    printf("url: %s\n", cfg.manifest_url);
+}
+
+static void ota_strip_query(char *url)
+{
+    char *q = strchr(url, '?');
+    if (q) {
+        *q = '\0';
+    }
+}
+
+static void cmd_ota(char *args)
+{
+    if (!args || !args[0]) {
+        cmd_ota_status();
+        return;
+    }
+    char *sub = NULL;
+    char *rest = NULL;
+    split_verb_args(args, &sub, &rest);
+    str_lower(sub);
+
+    if (strcmp(sub, "status") == 0 || strcmp(sub, "st") == 0) {
+        cmd_ota_status();
+        return;
+    }
+    if (strcmp(sub, "run") == 0) {
+        esp_err_t err = fw_ota_lte_start_background();
+        printf("ota run: %s\n", esp_err_to_name(err));
+        return;
+    }
+    if (strcmp(sub, "force") == 0) {
+        if (!rest || !rest[0]) {
+            printf("usage: ota force on|off\n");
+            return;
+        }
+        str_lower(rest);
+        fw_ota_lte_config_t cfg;
+        fw_ota_lte_get_config(&cfg);
+        if (strcmp(rest, "on") == 0) {
+            cfg.force = true;
+        } else if (strcmp(rest, "off") == 0) {
+            cfg.force = false;
+        } else {
+            printf("usage: ota force on|off\n");
+            return;
+        }
+        printf("ota force: %s\n", esp_err_to_name(fw_ota_lte_set_config(&cfg)));
+        return;
+    }
+    if (strcmp(sub, "url") == 0) {
+        if (!rest || !rest[0]) {
+            printf("usage: ota url <manifest-url>\n");
+            return;
+        }
+        fw_ota_lte_config_t cfg;
+        fw_ota_lte_get_config(&cfg);
+        snprintf(cfg.manifest_url, sizeof(cfg.manifest_url), "%s", rest);
+        ota_strip_query(cfg.manifest_url);
+        printf("ota url: %s\n", esp_err_to_name(fw_ota_lte_set_config(&cfg)));
+        return;
+    }
+    printf("usage: ota [status|run|force on|off|url <url>]\n");
 }
 
 static void cmd_uplink(char *args)
@@ -373,6 +471,8 @@ static void dispatch(char *verb, char *args)
         cmd_lte(args);
     } else if (strcmp(verb, "uplink") == 0) {
         cmd_uplink(args);
+    } else if (strcmp(verb, "ota") == 0) {
+        cmd_ota(args);
     } else {
         printf("unknown command: %s (type 'help')\n", verb);
     }

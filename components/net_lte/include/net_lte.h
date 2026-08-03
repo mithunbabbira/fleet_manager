@@ -2,6 +2,8 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +58,24 @@ typedef struct {
  * Treats HTTP 2xx as success. Serializes on the shared UART AT mutex.
  */
 esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out);
+
+/**
+ * HTTPS GET into a buffer (for small bodies e.g. OTA manifest JSON).
+ * Writes up to buf_len-1 bytes and NUL-terminates when treating as text.
+ * Sets *out_len to bytes copied (not including NUL).
+ */
+esp_err_t net_lte_http_get(const char *url, char *buf, size_t buf_len, size_t *out_len,
+                          net_lte_http_result_t *out);
+
+typedef esp_err_t (*net_lte_http_chunk_cb_t)(const uint8_t *data, size_t len, void *ctx);
+
+/**
+ * HTTPS GET streaming: after QHTTPGET, reads body via QHTTPREAD and invokes
+ * cb for each chunk. Does not buffer the full body in RAM.
+ * If content_length_out is non-NULL, sets advertised Content-Length (0 if unknown).
+ */
+esp_err_t net_lte_http_get_stream(const char *url, net_lte_http_chunk_cb_t cb, void *ctx,
+                                  size_t *content_length_out, net_lte_http_result_t *out);
 
 #ifdef __cplusplus
 }

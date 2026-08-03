@@ -38,8 +38,8 @@ On boot the device starts a Wi-Fi SoftAP for the web UI and REST API:
 
 | Setting | Default |
 |---|---|
-| SSID | `ELM327-C6` |
-| Password | `elm327c6` |
+| SSID | `Fleet-C6` |
+| Password | `fleetc6` |
 | Web UI | [http://192.168.4.1/](http://192.168.4.1/) |
 
 Values are configurable via Kconfig (`main/Kconfig.projbuild`) or menuconfig.
@@ -112,7 +112,7 @@ vehicle data path.
 
 > **For the operator:** complete this checklist on real hardware after flashing. On-device validation has **not** been performed as part of firmware development in CI — tick each item in your PR or lab notes.
 
-- [ ] SoftAP **`ELM327-C6`** appears; join with password **`elm327c6`**; open [http://192.168.4.1/](http://192.168.4.1/)
+- [ ] SoftAP **`Fleet-C6`** appears; join with password **`fleetc6`**; open [http://192.168.4.1/](http://192.168.4.1/)
 - [ ] Serial `status` reports `can_ready=yes` and the detected CAN protocol
 - [ ] `cmd 010C` returns engine RPM data
 - [ ] `cmd 04` is **blocked** (policy error / HTTP 403); vehicle never receives it

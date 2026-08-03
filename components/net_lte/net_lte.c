@@ -95,7 +95,7 @@ static esp_err_t uart_init(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    esp_err_t err = uart_driver_install(CONFIG_NET_LTE_UART_PORT, 2048, 0, 0, NULL, 0);
+    esp_err_t err = uart_driver_install(CONFIG_NET_LTE_UART_PORT, 16384, 0, 0, NULL, 0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
@@ -699,6 +699,327 @@ done:
     return rc;
 }
 
+static esp_err_t http_prepare_get_locked(const char *url, char *resp, size_t resp_len,
+                                         int *http_status, size_t *content_len)
+{
+    *http_status = 0;
+    *content_len = 0;
+
+    if (at_transact_locked("AT", resp, resp_len, 1000) != ESP_OK ||
+        strstr(resp, "OK") == NULL) {
+        return ESP_FAIL;
+    }
+    if (ensure_pdp_locked(resp, resp_len) != ESP_OK) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    at_transact_locked("AT+QHTTPCFG=\"contextid\",1", resp, resp_len, 3000);
+    at_transact_locked("AT+QHTTPCFG=\"sslctxid\",1", resp, resp_len, 3000);
+    at_transact_locked("AT+QSSLCFG=\"sslversion\",1,4", resp, resp_len, 3000);
+    at_transact_locked("AT+QSSLCFG=\"seclevel\",1,0", resp, resp_len, 3000);
+    at_transact_locked("AT+QSSLCFG=\"sni\",1,1", resp, resp_len, 3000);
+    at_transact_locked("AT+QHTTPCFG=\"requestheader\",0", resp, resp_len, 3000);
+    at_transact_locked("AT+QHTTPCFG=\"responseheader\",0", resp, resp_len, 3000);
+
+    if (http_set_url_locked(url, resp, resp_len) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    uint8_t drain[64];
+    while (uart_read_bytes(CONFIG_NET_LTE_UART_PORT, drain, sizeof(drain), 0) > 0) {
+    }
+    if (at_transact_locked("AT+QHTTPGET=120", resp, resp_len, 5000) != ESP_OK) {
+        /* OK may arrive before URC; still wait for URC below */
+    }
+
+    char urc[384];
+    at_wait_token_locked(urc, sizeof(urc), 180000, "+QHTTPGET:");
+    {
+        char tail[64];
+        at_collect_locked(tail, sizeof(tail), 300);
+        size_t used = strlen(urc);
+        snprintf(urc + used, sizeof(urc) - used, "%s", tail);
+    }
+    const char *p = strstr(urc, "+QHTTPGET:");
+    if (p == NULL) {
+        at_collect_locked(urc, sizeof(urc), 5000);
+        p = strstr(urc, "+QHTTPGET:");
+    }
+    if (p == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    int err = -1;
+    int status = 0;
+    int rlen = 0;
+    int n = sscanf(p, "+QHTTPGET: %d,%d,%d", &err, &status, &rlen);
+    if (n < 2) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    *http_status = status;
+    if (n >= 3 && rlen > 0) {
+        *content_len = (size_t)rlen;
+    }
+    if (err != 0 || status < 200 || status >= 300) {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t http_read_body_stream_locked(size_t content_len, net_lte_http_chunk_cb_t cb,
+                                              void *ctx, char *scratch, size_t scratch_len)
+{
+    uint8_t drain[64];
+    while (uart_read_bytes(CONFIG_NET_LTE_UART_PORT, drain, sizeof(drain), 0) > 0) {
+    }
+
+    const char *cmd = "AT+QHTTPREAD=120\r";
+    if (uart_write_bytes(CONFIG_NET_LTE_UART_PORT, cmd, strlen(cmd)) != (int)strlen(cmd)) {
+        return ESP_FAIL;
+    }
+    if (at_wait_token_locked(scratch, scratch_len, 120000, "CONNECT") != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    /* Quectel emits CONNECT\r\n then the HTTP body. Do not count CRLF as body bytes
+     * or a known Content-Length JSON payload gets truncated and cJSON fails. */
+    uint8_t first = 0;
+    bool have_first = false;
+    for (int i = 0; i < 8; ++i) {
+        uint8_t ch;
+        int n = uart_read_bytes(CONFIG_NET_LTE_UART_PORT, &ch, 1, pdMS_TO_TICKS(500));
+        if (n <= 0) {
+            break;
+        }
+        if (ch == '\r' || ch == '\n') {
+            continue;
+        }
+        first = ch;
+        have_first = true;
+        break;
+    }
+
+    uint8_t chunk[1024];
+    size_t chunk_used = 0;
+    if (have_first) {
+        chunk[0] = first;
+        chunk_used = 1;
+    }
+
+    if (content_len > 0) {
+        size_t remaining = content_len;
+        if (chunk_used > remaining) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        /* Emit the already-read first byte as part of the stream. */
+        while (remaining > 0) {
+            size_t want = remaining > sizeof(chunk) ? sizeof(chunk) : remaining;
+            size_t got = chunk_used;
+            chunk_used = 0;
+            TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(60000);
+            while (got < want) {
+                if (xTaskGetTickCount() > deadline) {
+                    return ESP_ERR_TIMEOUT;
+                }
+                int n = uart_read_bytes(CONFIG_NET_LTE_UART_PORT, chunk + got, want - got,
+                                        pdMS_TO_TICKS(200));
+                if (n > 0) {
+                    got += (size_t)n;
+                    deadline = xTaskGetTickCount() + pdMS_TO_TICKS(60000);
+                }
+            }
+            if (cb) {
+                esp_err_t cer = cb(chunk, got, ctx);
+                if (cer != ESP_OK) {
+                    return cer;
+                }
+            }
+            remaining -= got;
+        }
+    } else {
+        size_t total = chunk_used;
+        if (chunk_used && cb) {
+            esp_err_t cer = cb(chunk, chunk_used, ctx);
+            if (cer != ESP_OK) {
+                return cer;
+            }
+            chunk_used = 0;
+        }
+        TickType_t idle_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(30000);
+        for (;;) {
+            int n = uart_read_bytes(CONFIG_NET_LTE_UART_PORT, chunk, sizeof(chunk),
+                                    pdMS_TO_TICKS(200));
+            if (n > 0) {
+                if (cb) {
+                    esp_err_t cer = cb(chunk, (size_t)n, ctx);
+                    if (cer != ESP_OK) {
+                        return cer;
+                    }
+                }
+                total += (size_t)n;
+                idle_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(5000);
+                continue;
+            }
+            if (xTaskGetTickCount() > idle_deadline) {
+                break;
+            }
+        }
+        (void)total;
+    }
+
+    at_collect_locked(scratch, scratch_len, 3000);
+    return ESP_OK;
+}
+
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t used;
+} http_get_buf_ctx_t;
+
+static esp_err_t http_get_buf_cb(const uint8_t *data, size_t len, void *ctx)
+{
+    http_get_buf_ctx_t *c = (http_get_buf_ctx_t *)ctx;
+    if (c->used + len >= c->cap) {
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(c->buf + c->used, data, len);
+    c->used += len;
+    c->buf[c->used] = '\0';
+    return ESP_OK;
+}
+
+esp_err_t net_lte_http_get(const char *url, char *buf, size_t buf_len, size_t *out_len,
+                          net_lte_http_result_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (out_len) {
+        *out_len = 0;
+    }
+    if (!url || !buf || buf_len < 2) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "invalid args");
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_uart_ready || s_uart_mutex == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "UART not ready");
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(300000)) != pdTRUE) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "modem busy");
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    char resp[512];
+    int status = 0;
+    size_t clen = 0;
+    esp_err_t rc = http_prepare_get_locked(url, resp, sizeof(resp), &status, &clen);
+    if (out) {
+        out->http_status = status;
+    }
+    if (rc != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPGET fail status=%d", status);
+        }
+        goto done;
+    }
+    if (clen > 0 && clen >= buf_len) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "response too large (%u)", (unsigned)clen);
+        }
+        rc = ESP_ERR_NO_MEM;
+        goto done;
+    }
+
+    http_get_buf_ctx_t bctx = {.buf = buf, .cap = buf_len, .used = 0};
+    buf[0] = '\0';
+    rc = http_read_body_stream_locked(clen, http_get_buf_cb, &bctx, resp, sizeof(resp));
+    if (rc == ESP_OK) {
+        if (out_len) {
+            *out_len = bctx.used;
+        }
+        if (out) {
+            out->error[0] = '\0';
+        }
+    } else if (out) {
+        snprintf(out->error, sizeof(out->error), "QHTTPREAD fail");
+    }
+
+done:
+    xSemaphoreGive(s_uart_mutex);
+    ESP_LOGI(TAG, "http_get rc=%s status=%d len=%u", esp_err_to_name(rc),
+             out ? out->http_status : -1, (unsigned)(out_len ? *out_len : 0));
+    return rc;
+}
+
+esp_err_t net_lte_http_get_stream(const char *url, net_lte_http_chunk_cb_t cb, void *ctx,
+                                  size_t *content_length_out, net_lte_http_result_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (content_length_out) {
+        *content_length_out = 0;
+    }
+    if (!url || !cb) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "invalid args");
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_uart_ready || s_uart_mutex == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "UART not ready");
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(300000)) != pdTRUE) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "modem busy");
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    char resp[512];
+    int status = 0;
+    size_t clen = 0;
+    esp_err_t rc = http_prepare_get_locked(url, resp, sizeof(resp), &status, &clen);
+    if (out) {
+        out->http_status = status;
+    }
+    if (content_length_out) {
+        *content_length_out = clen;
+    }
+    if (rc != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPGET fail status=%d", status);
+        }
+        goto done;
+    }
+
+    rc = http_read_body_stream_locked(clen, cb, ctx, resp, sizeof(resp));
+    if (rc == ESP_OK) {
+        if (out) {
+            out->error[0] = '\0';
+        }
+    } else if (out && out->error[0] == '\0') {
+        snprintf(out->error, sizeof(out->error), "stream read fail");
+    }
+
+done:
+    xSemaphoreGive(s_uart_mutex);
+    ESP_LOGI(TAG, "http_get_stream rc=%s status=%d clen=%u", esp_err_to_name(rc),
+             out ? out->http_status : -1, (unsigned)clen);
+    return rc;
+}
+
 #else /* !CONFIG_NET_LTE_ENABLE */
 
 esp_err_t net_lte_start(void)
@@ -739,6 +1060,38 @@ esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_resu
 {
     (void)url;
     (void)body;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->error, sizeof(out->error), "CONFIG_NET_LTE_ENABLE=n");
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t net_lte_http_get(const char *url, char *buf, size_t buf_len, size_t *out_len,
+                          net_lte_http_result_t *out)
+{
+    (void)url;
+    (void)buf;
+    (void)buf_len;
+    if (out_len) {
+        *out_len = 0;
+    }
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->error, sizeof(out->error), "CONFIG_NET_LTE_ENABLE=n");
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t net_lte_http_get_stream(const char *url, net_lte_http_chunk_cb_t cb, void *ctx,
+                                  size_t *content_length_out, net_lte_http_result_t *out)
+{
+    (void)url;
+    (void)cb;
+    (void)ctx;
+    if (content_length_out) {
+        *content_length_out = 0;
+    }
     if (out) {
         memset(out, 0, sizeof(*out));
         snprintf(out->error, sizeof(out->error), "CONFIG_NET_LTE_ENABLE=n");

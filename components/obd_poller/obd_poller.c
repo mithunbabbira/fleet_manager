@@ -366,12 +366,12 @@ static void poller_task(void *arg)
             continue;
         }
 
-        /* ELM-era AT items (e.g. ATRV voltage) have no direct-CAN equivalent. */
+        /* AT profile items (e.g. ATRV) have no direct-CAN equivalent. */
         if ((item.cmd[0] == 'A' || item.cmd[0] == 'a') &&
             (item.cmd[1] == 'T' || item.cmd[1] == 't')) {
             static bool s_warned_at;
             if (!s_warned_at) {
-                ESP_LOGW(TAG, "skipping AT profile items (no ELM327 on CAN transport)");
+                ESP_LOGW(TAG, "skipping AT profile items (not used on CAN transport)");
                 s_warned_at = true;
             }
             if (xSemaphoreTake(s_profile_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {

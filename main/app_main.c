@@ -2,6 +2,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "fw_ota.h"
+#include "fw_ota_lte.h"
 #include "net_lte.h"
 #include "nvs_flash.h"
 #include "obd_poller.h"
@@ -58,6 +60,11 @@ void app_main(void)
     ESP_ERROR_CHECK(sys_runtime_init());
     ESP_LOGI(TAG, "sys_runtime ready");
 
+    ESP_ERROR_CHECK(fw_ota_init());
+    ESP_LOGI(TAG, "fw_ota ready");
+    ESP_ERROR_CHECK(fw_ota_lte_init());
+    ESP_LOGI(TAG, "fw_ota_lte ready");
+
     ESP_ERROR_CHECK(profile_store_init());
     ESP_LOGI(TAG, "profile_store ready");
     obd_profile_t active;
@@ -78,6 +85,14 @@ void app_main(void)
                      esp_err_to_name(lte_err));
         } else {
             ESP_LOGI(TAG, "net_lte ready");
+            esp_err_t auto_err = fw_ota_lte_start_auto();
+            if (auto_err == ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGI(TAG, "fw_ota_lte auto-check disabled");
+            } else if (auto_err != ESP_OK) {
+                ESP_LOGW(TAG, "fw_ota_lte_start_auto: %s", esp_err_to_name(auto_err));
+            } else {
+                ESP_LOGI(TAG, "fw_ota_lte auto-check started");
+            }
         }
     }
 
@@ -96,6 +111,14 @@ void app_main(void)
 
     ESP_ERROR_CHECK(transport_http_start());
     ESP_LOGI(TAG, "transport_http started");
+
+    /* Lab health gate: SoftAP/HTTP is up → confirm pending OTA image. */
+    {
+        esp_err_t ota_err = fw_ota_confirm_after_boot();
+        if (ota_err != ESP_OK) {
+            ESP_LOGW(TAG, "fw_ota_confirm_after_boot: %s", esp_err_to_name(ota_err));
+        }
+    }
 
     err = can_obd_init();
     if (err != ESP_OK) {
