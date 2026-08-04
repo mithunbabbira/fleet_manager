@@ -1025,6 +1025,25 @@ static esp_err_t api_ota_get(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/*
+ * LTE OTA endpoints (/api/ota/lte):
+ *
+ * - GET  /api/ota/lte
+ *      Returns current LTE OTA config (manifest_url/channel/device_id/force),
+ *      plus live phase/error and the latest seen manifest/applied versions.
+ *
+ * - POST /api/ota/lte
+ *      Saves fields into NVS (see fw_ota_lte.c):
+ *        manifest_url, channel, device_id, force
+ *      Then returns GET /api/ota/lte.
+ *
+ * - POST /api/ota/lte/run
+ *      Starts fw_ota_lte in the background (LTE GET manifest + download +
+ *      flash inactive OTA slot + reboot).
+ *
+ * Auto-check (boot-time / periodic) uses force=false and the same URL stored
+ * in NVS.
+ */
 #define OTA_RECV_CHUNK 4096
 
 static esp_err_t api_ota_post(httpd_req_t *req)

@@ -31,6 +31,20 @@ static uint8_t s_expect_sha[SHA256_BIN_LEN];
 static mbedtls_sha256_context s_sha;
 static bool s_sha_active;
 
+/*
+ * fw_ota is the generic "write an inactive OTA app slot" helper.
+ *
+ * Key points:
+ * - The partition table provides two app slots: ota_0 and ota_1.
+ * - During an update, we write into the *inactive* slot (next update partition).
+ * - After streaming the image, we:
+ *    1) verify sha256 matches the manifest
+ *    2) call esp_ota_end()
+ *    3) set boot partition to the newly written slot (esp_ota_set_boot_partition)
+ *    4) reboot (esp_restart)
+ *
+ * The actual boot choice is persisted in the `otadata` partition by ESP-IDF.
+ */
 static void set_error(const char *msg)
 {
     snprintf(s_error, sizeof(s_error), "%s", msg ? msg : "error");
@@ -85,6 +99,13 @@ esp_err_t fw_ota_init(void)
 
 esp_err_t fw_ota_confirm_after_boot(void)
 {
+    /*
+     * Lab health gate:
+     * If the running slot is ESP_OTA_IMG_PENDING_VERIFY, mark it valid to cancel
+     * rollback (so the device stays on the new image).
+     *
+     * This runs after SoftAP/HTTP comes up (see main/app_main.c).
+     */
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!running) {
         return ESP_ERR_NOT_FOUND;
@@ -114,6 +135,12 @@ esp_err_t fw_ota_confirm_after_boot(void)
 
 esp_err_t fw_ota_begin(size_t expected_size, const char *sha256_hex)
 {
+    /*
+     * Start OTA write:
+     * - Parse manifest sha256 hex into bytes.
+     * - Choose the inactive slot using esp_ota_get_next_update_partition().
+     * - Begin esp_ota with expected_size so esp_ota_write() can stream chunks.
+     */
     if (!s_mu) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -240,6 +267,15 @@ esp_err_t fw_ota_abort(void)
 
 esp_err_t fw_ota_end_and_reboot(void)
 {
+    /*
+     * Finish OTA and switch boot:
+     * - Verify we wrote exactly expected_size.
+     * - Finalize sha256 and compare with manifest sha256.
+     * - esp_ota_end() commits the image into the inactive slot.
+     * - esp_ota_set_boot_partition(s_update) updates otadata so next reboot runs
+     *   the new slot.
+     * - esp_restart() reboots; success does not return.
+     */
     if (!s_mu) {
         return ESP_ERR_INVALID_STATE;
     }

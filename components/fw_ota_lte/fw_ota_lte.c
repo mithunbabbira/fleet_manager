@@ -19,12 +19,29 @@
 static const char *TAG = "fw_ota_lte";
 
 #define NVS_NS "elm"
+/*
+ * Persistent OTA configuration (stored in ESP-IDF NVS partition).
+ *
+ * Why in NVS (not ota_0/ota_1)?
+ * - OTA overwrites only the inactive app slot.
+ * - NVS survives app upgrades so the device keeps the same LTE host/APN/device_id.
+ *
+ * Keys:
+ * - ota_manif: base manifest URL (e.g. https://.../firmware/manifest)
+ *              The device appends: ?device_id=<id>&channel=<channel>
+ * - ota_chan:  manifest channel string (currently "stable")
+ * - ota_force: if true, reflash even when version matches
+ * - uplink_did: uplink/device_id; kept in sync with OTA "device_id"
+ * - ota_applied: last successfully applied manifest "version" (prevents lab label-bumps
+ *                 from causing infinite redownload loops)
+ */
 #define NVS_KEY_URL "ota_manif"
 #define NVS_KEY_CHAN "ota_chan"
 #define NVS_KEY_FORCE "ota_force"
 #define NVS_KEY_DID "uplink_did"
 #define NVS_KEY_APPLIED "ota_applied"
 
+/* Manifest JSON is small (version/url/sha256/size). Keep this buffer tight. */
 #define MANIFEST_BUF_LEN 1536
 
 #ifndef CONFIG_FW_OTA_LTE_DEFAULT_MANIFEST_URL
@@ -247,6 +264,21 @@ esp_err_t fw_ota_lte_run(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /*
+     * OTA algorithm (LTE path):
+     *
+     * 1) Build full manifest request URL by appending the device identity.
+     * 2) GET the manifest JSON over LTE (small response).
+     * 3) Parse required fields: version, url (bin), sha256, size.
+     * 4) Version decision:
+     *      - If force=false and manifest.version == running app version => no_update
+     *      - If force=false and manifest.version == ota_applied (last successful) => no_update
+     *      - Otherwise: start OTA download.
+     * 5) Download bin over LTE using QHTTPGET streaming and write chunks into fw_ota.
+     *    fw_ota_begin() chooses the inactive ota_X slot using esp_ota_get_next_update_partition().
+     * 6) Verify sha256 + size inside fw_ota_end_and_reboot().
+     * 7) Persist ota_applied and reboot (bootloader+otadata selects the new ota_X).
+     */
     char url[256];
     build_manifest_url(&cfg, url, sizeof(url));
     ESP_LOGI(TAG, "fetching manifest: %s", url);
@@ -361,6 +393,10 @@ esp_err_t fw_ota_lte_run(void)
     }
 
     size_t clen = 0;
+    /*
+     * Stream the binary and immediately forward each chunk into fw_ota_write().
+     * This avoids buffering the full .bin in RAM.
+     */
     err = net_lte_http_get_stream(bin_url, stream_write_cb, NULL, &clen, &hr);
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_st.http_status = hr.http_status;

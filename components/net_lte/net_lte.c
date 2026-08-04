@@ -889,6 +889,19 @@ static esp_err_t http_get_buf_cb(const uint8_t *data, size_t len, void *ctx)
     return ESP_OK;
 }
 
+/*
+ * HTTPS GET helper (buffering version).
+ *
+ * Used by fw_ota_lte to fetch the *manifest JSON*:
+ * - We run QHTTPGET and then read the response into `buf`.
+ * - Callers provide a small buffer (MANIFEST_BUF_LEN) so we don't
+ *   risk large RAM usage.
+ *
+ * Concurrency note:
+ * - All modem AT transactions are serialized with `s_uart_mutex`.
+ * - That prevents "response mixing" when multiple tasks (OTA + telemetry)
+ *   talk to the modem over the same UART.
+ */
 esp_err_t net_lte_http_get(const char *url, char *buf, size_t buf_len, size_t *out_len,
                           net_lte_http_result_t *out)
 {
@@ -959,6 +972,14 @@ done:
     return rc;
 }
 
+/*
+ * HTTPS GET helper (streaming version).
+ *
+ * Used by fw_ota_lte to fetch the *firmware .bin*:
+ * - We run QHTTPGET to set up the download.
+ * - We read the body via QHTTPREAD in chunks and invoke `cb(chunk,len,ctx)`.
+ * - We do not buffer the full binary in RAM.
+ */
 esp_err_t net_lte_http_get_stream(const char *url, net_lte_http_chunk_cb_t cb, void *ctx,
                                   size_t *content_length_out, net_lte_http_result_t *out)
 {

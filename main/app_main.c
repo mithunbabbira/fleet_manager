@@ -24,8 +24,15 @@ static const char *TAG = "app";
 #define BONDED_BOOT_WAIT_MS    15000
 #define BONDED_BOOT_POLL_MS    200
 
-/* Enable profile polling as soon as the CAN link finds an ECU; pause it on
- * link loss so can_obd can reprobe protocols without poll traffic. */
+/*
+ * CAN link supervisor.
+ *
+ * can_obd auto-detects ISO-TP / OBD-II protocol on the MCP2515. Once an ECU
+ * answers, enable the profile poller. On link loss, pause polling so can_obd
+ * can re-probe without competing traffic.
+ *
+ * (Name "bonded_boot" is historical from the BLE era; this task is CAN-only now.)
+ */
 static void can_boot_task(void *arg)
 {
     (void)arg;
@@ -47,8 +54,26 @@ static void can_boot_task(void *arg)
     }
 }
 
+/*
+ * Fleet telematics node entry (runs from whichever OTA slot otadata selected:
+ * ota_0 or ota_1). Boot order matters:
+ *
+ *  1) NVS          — settings survive OTA (manifest URL, uplink, profiles, …)
+ *  2) fw_ota*      — dual-bank flash writer + LTE OTA client (loads ota_manif)
+ *  3) profiles/bus — OBD poll config + in-process telemetry pub/sub
+ *  4) LTE + auto   — EC200U UART; then background GET /firmware/manifest
+ *  5) uplink       — periodic cloud POST over LTE
+ *  6) serial/SoftAP— local console + Wi-Fi UI (set OTA URL, force run, …)
+ *  7) OTA confirm  — mark pending image valid (lab SoftAP health gate)
+ *  8) CAN + poller — MCP2515 path; can_boot_task enables poll when link is up
+ *
+ * LTE auto-check (fw_ota_lte_start_auto): wait for registration → GET manifest →
+ * compare version → stream .bin into inactive ota_X → update otadata → reboot.
+ * SoftAP/serial can still trigger the same path manually.
+ */
 void app_main(void)
 {
+    /* --- NVS partition (elm namespace keys: ota_manif, uplink_*, profiles, …) --- */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -60,6 +85,7 @@ void app_main(void)
     ESP_ERROR_CHECK(sys_runtime_init());
     ESP_LOGI(TAG, "sys_runtime ready");
 
+    /* Dual-bank writer (ota_0/ota_1) + LTE orchestrator (manifest GET / download). */
     ESP_ERROR_CHECK(fw_ota_init());
     ESP_LOGI(TAG, "fw_ota ready");
     ESP_ERROR_CHECK(fw_ota_lte_init());
@@ -75,7 +101,11 @@ void app_main(void)
     ESP_ERROR_CHECK(telemetry_bus_init());
     ESP_LOGI(TAG, "telemetry_bus ready");
 
-    /* UART AT check / PPP: requires EC200U wired to GPIO17 TX / GPIO16 RX. */
+    /*
+     * LTE (EC200U on UART1: GPIO17 TX / GPIO16 RX).
+     * Bring-up is background; once AT works, start OTA auto-check task
+     * (waits ~90s for registration, then GET manifest every 24h by default).
+     */
     {
         esp_err_t lte_err = net_lte_start();
         if (lte_err == ESP_ERR_NOT_SUPPORTED) {
@@ -96,6 +126,7 @@ void app_main(void)
         }
     }
 
+    /* Cloud telemetry POST (shares net_lte UART mutex with OTA HTTP). */
     {
         esp_err_t up_err = telemetry_uplink_start();
         if (up_err != ESP_OK) {
@@ -106,13 +137,18 @@ void app_main(void)
         }
     }
 
+    /* USB console: `ota url|run|force|status`, `lte`, `uplink`, … */
     ESP_ERROR_CHECK(transport_serial_start());
     ESP_LOGI(TAG, "transport_serial started");
 
+    /* SoftAP Fleet-C6 + REST/UI including SoftAP .bin upload and LTE OTA config. */
     ESP_ERROR_CHECK(transport_http_start());
     ESP_LOGI(TAG, "transport_http started");
 
-    /* Lab health gate: SoftAP/HTTP is up → confirm pending OTA image. */
+    /*
+     * After SoftAP is up: if this boot is a new OTA image in PENDING_VERIFY,
+     * mark it valid and cancel rollback (otadata). Lab gate = "HTTP came up".
+     */
     {
         esp_err_t ota_err = fw_ota_confirm_after_boot();
         if (ota_err != ESP_OK) {
@@ -120,6 +156,7 @@ void app_main(void)
         }
     }
 
+    /* MCP2515 SPI CAN → ISO-TP OBD; poller starts paused until can_boot_task. */
     err = can_obd_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "can_obd_init: %s — check MCP2515 wiring/power",

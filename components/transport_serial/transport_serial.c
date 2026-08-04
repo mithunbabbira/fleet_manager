@@ -153,6 +153,27 @@ static void ota_strip_query(char *url)
     }
 }
 
+/*
+ * Serial OTA console:
+ *
+ * - `ota status`
+ *     Prints fw_ota status (expected/bytes written, which partition is next)
+ *     and fw_ota_lte status (current phase/error, last manifest/applied versions).
+ *
+ * - `ota run`
+ *     Triggers fw_ota_lte_start_background() immediately.
+ *     Uses force=false unless you changed it via `ota force on`.
+ *
+ * - `ota force on|off`
+ *     Persists the force flag into NVS (fw_ota_lte NVS key: ota_force).
+ *     When force is ON, version match will not skip the manifest download.
+ *
+ * - `ota url <manifest-url>`
+ *     Persists the base manifest URL into NVS (fw_ota_lte NVS key: ota_manif).
+ *     The device appends: ?device_id=<id>&channel=<channel> at request time.
+ *     We strip the input query string so users don't accidentally double-add
+ *     device_id/channel parameters.
+ */
 static void cmd_ota(char *args)
 {
     if (!args || !args[0]) {
