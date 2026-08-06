@@ -62,6 +62,48 @@ int main(void)
     assert(strstr(buf, "\"speed_kmh\":0") != NULL);
     assert(strstr(buf, "\"speed_ok\":true") != NULL);
 
+    char payload[1800];
+    int pn = uplink_payload_build_payload(&snap, payload, sizeof(payload));
+    assert(pn > 0);
+    assert(payload[0] == '{');
+    assert(strstr(payload, "schemaId") == NULL);
+
+    char event[1900];
+    int en = uplink_payload_build_queued_event(payload, 12345ULL, event, sizeof(event));
+    assert(en > 0);
+    assert(strstr(event, "\"queued_at_ms\":12345") != NULL);
+    assert(strstr(event, "\"payload\":{") != NULL);
+
+    char line2[1900];
+    assert(uplink_payload_build_queued_event(payload, 67890ULL, line2, sizeof(line2)) > 0);
+    char blob[4000];
+    snprintf(blob, sizeof(blob), "%s\n%s", event, line2);
+    char batch[4500];
+    int bn = uplink_payload_build_batch(blob, 2, batch, sizeof(batch));
+    assert(bn > 0);
+    assert(strstr(batch, "\"schemaId\":\"1087\"") != NULL);
+    assert(strstr(batch, "\"events\":[") != NULL);
+    assert(strstr(batch, "12345") != NULL);
+    assert(strstr(batch, "67890") != NULL);
+
+    snap.gps_ok = true;
+    snap.lat = 12.9716;
+    snap.lng = 77.5946;
+    n = uplink_payload_build(&snap, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"gps_ok\":true") != NULL);
+    assert(strstr(buf, "\"lat\":12.9716") != NULL || strstr(buf, "\"lat\":12.971") != NULL);
+    assert(strstr(buf, "\"lng\":77.5946") != NULL || strstr(buf, "\"lng\":77.594") != NULL);
+    /* Must be inside payload, not next to schemaId only */
+    assert(strstr(buf, "\"payload\":{") != NULL);
+
+    snap.gps_ok = false;
+    n = uplink_payload_build(&snap, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"gps_ok\":false") != NULL);
+    assert(strstr(buf, "\"lat\":") == NULL);
+    assert(strstr(buf, "\"lng\":") == NULL);
+
     printf("test_uplink_payload: PASS\n");
     return 0;
 }

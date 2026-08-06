@@ -101,7 +101,7 @@ static int append_pid_fields(char *out, size_t out_len, size_t *off,
     return 0;
 }
 
-int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_len)
+int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_t out_len)
 {
     if (!snap || !out || out_len < 32) {
         return -1;
@@ -109,16 +109,9 @@ int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_le
     size_t off = 0;
     out[0] = '\0';
 
-    if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
+    if (append(out, out_len, &off, "{") != 0) {
         return -1;
     }
-    if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
-        return -1;
-    }
-    if (append(out, out_len, &off, "\",\"payload\":{") != 0) {
-        return -1;
-    }
-
     if (append(out, out_len, &off, "\"device_id\":") != 0 ||
         append_json_str(out, out_len, &off, snap->device_id) != 0) {
         return -1;
@@ -168,7 +161,6 @@ int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_le
         return -1;
     }
 
-    /* Numeric keys match the Trafyn sample payload. */
     if (append_pid_fields(out, out_len, &off, "rpm", "rpm_raw_hex", "rpm_age_ms", "rpm_ok",
                           &snap->rpm, true) != 0) {
         return -1;
@@ -190,7 +182,127 @@ int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_le
         return -1;
     }
 
-    if (append(out, out_len, &off, ",\"source\":\"esp32_obd\"}}") != 0) {
+    if (appendf(out, out_len, &off, ",\"gps_ok\":%s",
+                snap->gps_ok ? "true" : "false") != 0) {
+        return -1;
+    }
+    if (snap->gps_ok) {
+        if (appendf(out, out_len, &off, ",\"lat\":%.7f,\"lng\":%.7f",
+                    snap->lat, snap->lng) != 0) {
+            return -1;
+        }
+    }
+
+    if (append(out, out_len, &off, ",\"source\":\"esp32_obd\"}") != 0) {
+        return -1;
+    }
+    return (int)off;
+}
+
+int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_len)
+{
+    if (!snap || !out || out_len < 32) {
+        return -1;
+    }
+    char payload[1800];
+    int pn = uplink_payload_build_payload(snap, payload, sizeof(payload));
+    if (pn < 0) {
+        return -1;
+    }
+    size_t off = 0;
+    out[0] = '\0';
+    if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, "\",\"payload\":") != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, payload) != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, "}") != 0) {
+        return -1;
+    }
+    return (int)off;
+}
+
+int uplink_payload_build_queued_event(const char *payload_json, uint64_t queued_at_ms,
+                                      char *out, size_t out_len)
+{
+    if (!payload_json || !out || out_len < 32) {
+        return -1;
+    }
+    size_t off = 0;
+    out[0] = '\0';
+    if (append(out, out_len, &off, "{\"payload\":") != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, payload_json) != 0) {
+        return -1;
+    }
+    if (appendf(out, out_len, &off, ",\"queued_at_ms\":%llu}",
+                (unsigned long long)queued_at_ms) != 0) {
+        return -1;
+    }
+    return (int)off;
+}
+
+int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *out,
+                               size_t out_len)
+{
+    if (!events_blob || !out || out_len < 32 || n_events == 0) {
+        return -1;
+    }
+    size_t off = 0;
+    out[0] = '\0';
+    if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, "\",\"events\":[") != 0) {
+        return -1;
+    }
+
+    /* events_blob is newline-separated JSON objects. */
+    const char *p = events_blob;
+    size_t emitted = 0;
+    while (*p && emitted < n_events) {
+        while (*p == '\n' || *p == '\r') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        const char *start = p;
+        while (*p && *p != '\n' && *p != '\r') {
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == 0) {
+            continue;
+        }
+        if (emitted > 0) {
+            if (append(out, out_len, &off, ",") != 0) {
+                return -1;
+            }
+        }
+        if (off + len + 1 > out_len) {
+            return -1;
+        }
+        memcpy(out + off, start, len);
+        off += len;
+        out[off] = '\0';
+        emitted++;
+    }
+    if (emitted == 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, "]}") != 0) {
         return -1;
     }
     return (int)off;

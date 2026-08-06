@@ -41,14 +41,34 @@ typedef struct {
     uplink_pid_view_t coolant;
     uplink_pid_view_t throttle;
     uplink_pid_view_t voltage;
+    bool gps_ok;
+    double lat;
+    double lng;
 } uplink_snapshot_t;
 
 /**
  * Build cloud event JSON into out (NUL-terminated).
  * Returns bytes written excluding NUL, or -1 on failure.
- * Missing/stale/!ok PIDs become JSON null with *_ok false.
+ * Missing/stale/!ok PIDs omit value keys with *_ok false.
  */
 int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_len);
+
+/** Build only the payload object `{...}` (no schemaId wrapper). */
+int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_t out_len);
+
+/**
+ * Build one queued event line: {"payload":{...},"queued_at_ms":N}
+ * payload_json is the object from uplink_payload_build_payload.
+ */
+int uplink_payload_build_queued_event(const char *payload_json, uint64_t queued_at_ms,
+                                      char *out, size_t out_len);
+
+/**
+ * Build batch body from NDJSON event objects (one JSON object per line in events_blob).
+ * events_blob lines are already {"payload":...,"queued_at_ms":...}.
+ */
+int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *out,
+                               size_t out_len);
 
 /** True if a PID should be emitted as a numeric value. */
 bool uplink_pid_is_fresh_ok(const uplink_pid_view_t *p);
