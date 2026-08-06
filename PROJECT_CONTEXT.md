@@ -27,9 +27,9 @@ The default profile is `fleet_basic`. The CAN path was validated in-car on
 | Item | Detail |
 |---|---|
 | MCU | ESP32-C6 Mini, 4 MB flash |
-| CAN | MCP2515 over SPI; GPIO20 MOSI, GPIO21 MISO, GPIO22 SCLK, GPIO23 CS, GPIO14 INT |
+| CAN | MCP2515 over SPI through TXS0108E level shifter; GPIO21 SCK, GPIO22 MOSI, GPIO23 MISO, GPIO20 CS, GPIO14 INT |
 | Console | USB Serial/JTAG, 115200 8N1 |
-| Wi-Fi | SoftAP `Fleet-C6`, password `fleetc6`, UI at `http://192.168.4.1/` |
+| Wi-Fi | SoftAP `Fleet-C6`, password `fleetc61`, UI at `http://192.168.4.1/` |
 | LTE | Quectel EC200U on UART1; GPIO17 TX, GPIO16 RX, 115200 8N1 |
 | APN | `airtelgprs.com` by default |
 
@@ -71,9 +71,10 @@ components/
 ├── obd_codec/           PID, DTC, and VIN decoding
 ├── obd_poller/          profile-driven poll task and raw-command queue
 ├── profile_store/       NVS profiles and safety settings
+├── store_sd/            microSD (SPI CS18) durable uplink queue
 ├── sys_runtime/         watchdog, metrics, and OTA stub
 ├── telemetry_bus/       in-process typed pub/sub
-├── telemetry_uplink/    LTE cloud payload and send scheduling
+├── telemetry_uplink/    LTE cloud payload, SD enqueue, batch drain
 ├── transport_http/      SoftAP, REST API, and embedded web UI
 └── transport_serial/    USB interactive console
 ```
@@ -87,7 +88,8 @@ exist or participate in CMake.
 MCP2515 → can_obd → obd_poller → telemetry_bus
                            ├──→ transport_serial
                            ├──→ transport_http
-                           └──→ telemetry_uplink → net_lte → cloud
+                           └──→ telemetry_uplink → store_sd → net_lte → cloud
+                                              (or live POST if SD missing)
 
 profile_store → obd_poller / command safety / uplink configuration
 sys_runtime   → watchdog and metrics across the application
@@ -100,11 +102,11 @@ detection and pauses while the CAN link is unavailable.
 ## Boot flow
 
 1. Initialize NVS, runtime metrics/watchdog, profiles, and telemetry bus.
-2. Start LTE and telemetry uplink; failures are non-fatal.
-3. Start serial and SoftAP/HTTP transports.
-4. Initialize and start `can_obd` protocol detection.
-5. Start `obd_poller` paused.
-6. The CAN boot task enables polling when an ECU responds and pauses it on loss.
+2. Start LTE (OTA auto-check); failures are non-fatal.
+3. Init SPI2 mutex → MCP2515 (`can_obd`) → microSD (`store_sd`).
+4. Start telemetry uplink (produce→SD queue, drain→batch POST).
+5. Start serial and SoftAP/HTTP transports; confirm OTA if pending.
+6. Start `obd_poller` paused; CAN boot task enables it when an ECU responds.
 
 ## Interfaces
 
@@ -117,10 +119,13 @@ LTE, uplink, VIN, DTC, safety, health, and raw OBD command APIs. See
 
 ## LTE uplink
 
-`telemetry_uplink` posts OBD snapshots to the configured fleet endpoint through
-the EC200U. It is disabled by default and can be controlled from the SoftAP UI,
-REST API, or serial console. Sends are gated on CAN readiness, polling, and fresh
-samples; missing values are represented explicitly in the payload.
+`telemetry_uplink` builds OBD snapshots (including optional `lat`/`lng`/`gps_ok`
+from the EC200U GNSS cache when fixed) and enqueues them on microSD
+(`/sdcard/uplinkq.dat`). A drain task batch-POSTs events to the fleet
+endpoint through the EC200U and removes records only after HTTP 2xx. If the SD
+card is missing, it falls back to live single-event POST. SoftAP/serial status
+exposes queue depth, SD mount state, and GNSS fix (`uplink` command). See
+`docs/superpowers/specs/2026-08-06-sd-uplink-queue-design.md`.
 
 ## Known follow-up work
 

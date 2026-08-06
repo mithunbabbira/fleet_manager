@@ -11,6 +11,7 @@
 #include "sys_runtime.h"
 #include "telemetry_bus.h"
 #include "telemetry_uplink.h"
+#include "store_sd.h"
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_err.h"
@@ -108,7 +109,7 @@ static void cmd_help(void)
         "  unsafe on|off\n"
         "  metrics\n"
         "  lte [reconnect|test]\n"
-        "  uplink [on|off|now]\n"
+        "  uplink [on|off|now|qtest]\n"
         "  ota [status|run|force on|force off|url <url>]\n");
 }
 
@@ -256,6 +257,17 @@ static void cmd_uplink(char *args)
             }
             return;
         }
+        if (strcmp(args, "qtest") == 0) {
+            esp_err_t err = telemetry_uplink_queue_test_enqueue();
+            telemetry_uplink_status_t st;
+            telemetry_uplink_get_status(&st);
+            store_sd_status_t sd;
+            store_sd_get_status(&sd);
+            printf("uplink qtest: %s sd=%s depth=%u drain_err=\"%s\" sd_err=\"%s\"\n",
+                   esp_err_to_name(err), st.queue.sd_mounted ? "yes" : "no",
+                   (unsigned)st.queue.queue_depth, st.queue.drain_error, sd.last_error);
+            return;
+        }
     }
 
     telemetry_uplink_status_t st;
@@ -269,7 +281,19 @@ static void cmd_uplink(char *args)
     printf("        last: ok=%s skipped=%s http=%d reason=\"%s\" error=\"%s\"\n",
            st.last.ok ? "yes" : "no", st.last.skipped ? "yes" : "no",
            st.last.http_status, st.last.reason, st.last.error);
+    printf("        queue: sd=%s depth=%u bytes=%llu drain_err=\"%s\"\n",
+           st.queue.sd_mounted ? "yes" : "no", (unsigned)st.queue.queue_depth,
+           (unsigned long long)st.queue.queue_bytes, st.queue.drain_error);
     printf("        url=%s schemaId=%s\n", st.url, st.schema_id);
+    net_lte_gps_t gps;
+    if (net_lte_gps_get(&gps) == ESP_OK) {
+        if (gps.gps_ok) {
+            printf("        gps: ok lat=%.6f lng=%.6f age_ms=%u\n",
+                   gps.lat, gps.lng, (unsigned)gps.age_ms);
+        } else {
+            printf("        gps: no fix\n");
+        }
+    }
 }
 
 static void cmd_lte(char *args)
