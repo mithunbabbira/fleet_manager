@@ -2,6 +2,7 @@
 
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -22,6 +23,17 @@ static net_lte_status_t s_status;
 static bool s_uart_ready;
 static SemaphoreHandle_t s_uart_mutex;
 static TaskHandle_t s_bringup_task;
+
+#if CONFIG_NET_LTE_GPS_ENABLE
+/* GNSS cache, protected by its own mutex (independent of modem UART traffic
+ * so net_lte_gps_get() never blocks behind an in-flight AT/HTTP transaction). */
+static SemaphoreHandle_t s_gps_mutex;
+static bool s_gps_ok;
+static double s_gps_lat, s_gps_lng;
+static int64_t s_gps_fix_ms; /* esp_timer ms when last good fix stored */
+static TaskHandle_t s_gps_task;
+static void gps_task(void *arg);
+#endif
 
 static esp_err_t at_transact_locked(const char *cmd, char *resp, size_t resp_len, int timeout_ms)
 {
@@ -200,6 +212,18 @@ esp_err_t net_lte_start(void)
         return err;
     }
 
+#if CONFIG_NET_LTE_GPS_ENABLE
+    if (s_gps_mutex == NULL) {
+        s_gps_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_gps_mutex != NULL && s_gps_task == NULL) {
+        if (xTaskCreate(gps_task, "lte_gps", 4096, NULL, 3, &s_gps_task) != pdPASS) {
+            ESP_LOGW(TAG, "gps task spawn failed; lat/lng will stay unavailable");
+            s_gps_task = NULL;
+        }
+    }
+#endif
+
     if (s_bringup_task != NULL) {
         ESP_LOGW(TAG, "bring-up already running");
         return ESP_OK;
@@ -279,6 +303,99 @@ esp_err_t net_lte_refresh(void)
             s_status.attached = (atoi(p + 7) == 1) || strstr(p, "1") != NULL;
         }
     }
+    return ESP_OK;
+}
+
+#if CONFIG_NET_LTE_GPS_ENABLE
+/*
+ * Parse "+QGPSLOC: <utc>,<lat>,<lng>,<hdop>,<alt>,<fix>,<cog>,<spkm>,<spkn>,
+ * <date>,<nsat>" as returned by `AT+QGPSLOC=2` (decimal-degree mode) on the
+ * EC200U. Field 0 is UTC time (skipped), field 1 is latitude, field 2 is
+ * longitude — both signed decimal degrees, e.g. "11.05507,76.94632".
+ * Verified against Quectel EC200U/EG915U GNSS application-note examples;
+ * adjust indices here if a different firmware/URC layout is seen in the field.
+ */
+static bool parse_qgpsloc(const char *resp, double *lat_out, double *lng_out)
+{
+    const char *p = strstr(resp, "+QGPSLOC:");
+    if (p == NULL) {
+        return false;
+    }
+    p += strlen("+QGPSLOC:");
+
+    double lat = 0.0, lng = 0.0;
+    if (sscanf(p, " %*[^,],%lf,%lf", &lat, &lng) != 2) {
+        return false;
+    }
+    if (lat_out) {
+        *lat_out = lat;
+    }
+    if (lng_out) {
+        *lng_out = lng;
+    }
+    return true;
+}
+
+static void gps_task(void *arg)
+{
+    (void)arg;
+    char resp[192];
+
+    while (!s_uart_ready) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    /* Turn GNSS on once; "already on" style errors are harmless and ignored. */
+    at_transact("AT+QGPS=1", resp, sizeof(resp), 3000);
+
+    for (;;) {
+        if (at_transact("AT+QGPSLOC=2", resp, sizeof(resp), 3000) == ESP_OK) {
+            double lat = 0.0, lng = 0.0;
+            if (parse_qgpsloc(resp, &lat, &lng)) {
+                if (xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                    s_gps_ok = true;
+                    s_gps_lat = lat;
+                    s_gps_lng = lng;
+                    s_gps_fix_ms = esp_timer_get_time() / 1000;
+                    xSemaphoreGive(s_gps_mutex);
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_NET_LTE_GPS_REFRESH_S * 1000));
+    }
+}
+#endif /* CONFIG_NET_LTE_GPS_ENABLE */
+
+esp_err_t net_lte_gps_get(net_lte_gps_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+
+#if CONFIG_NET_LTE_GPS_ENABLE
+    if (s_gps_mutex == NULL) {
+        return ESP_OK;
+    }
+    if (xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    bool ok = s_gps_ok;
+    double lat = s_gps_lat;
+    double lng = s_gps_lng;
+    int64_t fix_ms = s_gps_fix_ms;
+    xSemaphoreGive(s_gps_mutex);
+
+    int64_t age_ms = (esp_timer_get_time() / 1000) - fix_ms;
+    if (!ok || age_ms < 0 || age_ms > (int64_t)CONFIG_NET_LTE_GPS_MAX_AGE_S * 1000) {
+        out->gps_ok = false;
+        return ESP_OK;
+    }
+    out->gps_ok = true;
+    out->lat = lat;
+    out->lng = lng;
+    out->age_ms = (uint32_t)age_ms;
+#endif
     return ESP_OK;
 }
 
@@ -1075,6 +1192,15 @@ esp_err_t net_lte_selftest(char *report, size_t len)
 esp_err_t net_lte_reconnect(void)
 {
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t net_lte_gps_get(net_lte_gps_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    return ESP_OK;
 }
 
 esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out)

@@ -32,4 +32,21 @@ menu "EC200U LTE (net_lte)"
         default "airtelgprs.com"
         depends on NET_LTE_ENABLE
 
+    config NET_LTE_GPS_ENABLE
+        bool "Enable EC200U GNSS for uplink lat/lng"
+        default y
+        depends on NET_LTE_ENABLE
+
+    config NET_LTE_GPS_REFRESH_S
+        int "GNSS refresh interval (seconds)"
+        default 10
+        range 5 120
+        depends on NET_LTE_GPS_ENABLE
+
+    config NET_LTE_GPS_MAX_AGE_S
+        int "Max GNSS fix age before gps_ok=false (seconds)"
+        default 120
+        range 30 600
+        depends on NET_LTE_GPS_ENABLE
+
 endmenu

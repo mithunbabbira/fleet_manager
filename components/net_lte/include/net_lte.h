@@ -49,6 +49,16 @@ esp_err_t net_lte_selftest(char *report, size_t report_len);
 esp_err_t net_lte_reconnect(void);
 
 typedef struct {
+    bool gps_ok;
+    double lat;
+    double lng;
+    uint32_t age_ms;
+} net_lte_gps_t;
+
+/** Copy latest GNSS cache. gps_ok false if never fixed or older than max age. */
+esp_err_t net_lte_gps_get(net_lte_gps_t *out);
+
+typedef struct {
     int http_status; /* 0 if unknown / transport failed before status */
     char error[96];
 } net_lte_http_result_t;
