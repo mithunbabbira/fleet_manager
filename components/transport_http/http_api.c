@@ -727,6 +727,13 @@ static void add_uplink_json(cJSON *root, const telemetry_uplink_status_t *st)
     cJSON_AddStringToObject(last, "reason", st->last.reason);
     cJSON_AddStringToObject(last, "error", st->last.error);
     cJSON_AddItemToObject(root, "last", last);
+
+    cJSON *q = cJSON_CreateObject();
+    cJSON_AddBoolToObject(q, "sd_mounted", st->queue.sd_mounted);
+    cJSON_AddNumberToObject(q, "depth", st->queue.queue_depth);
+    cJSON_AddNumberToObject(q, "bytes", (double)st->queue.queue_bytes);
+    cJSON_AddStringToObject(q, "drain_error", st->queue.drain_error);
+    cJSON_AddItemToObject(root, "queue", q);
 }
 
 static esp_err_t api_uplink_get(httpd_req_t *req)

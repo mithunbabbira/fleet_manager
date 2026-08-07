@@ -6,9 +6,9 @@ menu "Fleet telematics node"
 
     config ELM_SOFTAP_PASS
         string "SoftAP password"
-        default "fleetc6"
+        default "fleetc61"
         help
-            Minimum 8 characters.
+            Minimum 8 characters (WPA2).
 
     config ELM_CMD_TIMEOUT_MS
         int "OBD command timeout (ms)"

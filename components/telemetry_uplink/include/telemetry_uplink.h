@@ -26,8 +26,16 @@ typedef struct {
 } telemetry_uplink_last_t;
 
 typedef struct {
+    bool sd_mounted;
+    uint32_t queue_depth;
+    uint64_t queue_bytes;
+    char drain_error[80];
+} telemetry_uplink_queue_t;
+
+typedef struct {
     telemetry_uplink_config_t config;
     telemetry_uplink_last_t last;
+    telemetry_uplink_queue_t queue;
     const char *url;
     const char *schema_id;
 } telemetry_uplink_status_t;
@@ -38,8 +46,11 @@ esp_err_t telemetry_uplink_get_config(telemetry_uplink_config_t *out);
 esp_err_t telemetry_uplink_set_config(const telemetry_uplink_config_t *in);
 esp_err_t telemetry_uplink_get_status(telemetry_uplink_status_t *out);
 
-/** Force one uplink attempt (same gating as the interval task). */
+/** Force one produce+enqueue (and kick drain). Same gating as the interval task. */
 esp_err_t telemetry_uplink_send_now(void);
+
+/** Lab helper: enqueue a minimal dummy event (no CAN gate) and kick drain. */
+esp_err_t telemetry_uplink_queue_test_enqueue(void);
 
 #ifdef __cplusplus
 }
