@@ -99,7 +99,7 @@ int fw_ota_parse_check_json(const char *json, const char *stripped_current,
     const char *presigned_url = cJSON_IsString(url) ? url->valuestring : "";
     const char *sha256 = cJSON_IsString(sha) ? sha->valuestring : NULL;
     size_t size = 0;
-    if (cJSON_IsNumber(size_item)) {
+    if (cJSON_IsNumber(size_item) && size_item->valuedouble > 0) {
         size = (size_t)size_item->valuedouble;
     }
 

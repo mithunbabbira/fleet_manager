@@ -53,6 +53,15 @@ int main(void)
     assert(fw_ota_parse_check_json(nosha, "1.0.4", &r) == 0);
     assert(r.kind == FW_OTA_CHECK_FAIL);
 
+    const char *neg_size =
+        "{\"success\":true,\"data\":{\"latestVersion\":\"1.0.9\","
+        "\"presignedUrl\":\"https://x\",\"updateAvailable\":true,"
+        "\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\","
+        "\"size\":-1}}";
+    assert(fw_ota_parse_check_json(neg_size, "1.0.4", &r) == 0);
+    assert(r.kind == FW_OTA_CHECK_FAIL);
+    assert(strcmp(r.error, "missing_sha_size") == 0);
+
     printf("test_fw_ota_lte_parse: ok\n");
     return 0;
 }
