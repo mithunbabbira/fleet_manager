@@ -35,8 +35,19 @@ target_include_directories(test_obd_isotp PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/can_obd/include
 )
 
+add_executable(test_fw_ota_lte_parse
+    test_fw_ota_lte_parse.c
+    ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/fw_ota_lte_parse.c
+    $ENV{IDF_PATH}/components/json/cJSON/cJSON.c
+)
+target_include_directories(test_fw_ota_lte_parse PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/include
+    $ENV{IDF_PATH}/components/json/cJSON
+)
+
 enable_testing()
 add_test(NAME test_cmd_policy COMMAND test_cmd_policy)
 add_test(NAME test_obd_codec COMMAND test_obd_codec)
 add_test(NAME test_uplink_payload COMMAND test_uplink_payload)
 add_test(NAME test_obd_isotp COMMAND test_obd_isotp)
+add_test(NAME test_fw_ota_lte_parse COMMAND test_fw_ota_lte_parse)
