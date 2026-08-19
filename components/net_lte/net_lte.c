@@ -1190,29 +1190,38 @@ esp_err_t net_lte_http_post_recv(const char *url, const char *body,
 
     if (resp_buf != NULL) {
         size_t clen = (rlen > 0) ? (size_t)rlen : 0;
-        if (clen > 0 && clen >= resp_buf_len) {
-            if (out) {
-                snprintf(out->error, sizeof(out->error), "response too large (%u)",
-                         (unsigned)clen);
-            }
-            rc = ESP_ERR_NO_MEM;
-        } else {
-            http_get_buf_ctx_t bctx = {.buf = resp_buf, .cap = resp_buf_len, .used = 0};
-            resp_buf[0] = '\0';
-            esp_err_t read_rc =
-                http_read_body_stream_locked(clen, http_get_buf_cb, &bctx, resp, sizeof(resp));
-            if (read_rc == ESP_OK) {
-                if (resp_len) {
-                    *resp_len = bctx.used;
+        /* Stream when body length is known or HTTP 2xx; otherwise short-drain
+         * (non-2xx with rlen==0 can hang 120s waiting for CONNECT). */
+        const bool stream_body = (rlen > 0) || (rc == ESP_OK);
+        if (stream_body) {
+            if (clen > 0 && clen >= resp_buf_len) {
+                if (out) {
+                    snprintf(out->error, sizeof(out->error), "response too large (%u)",
+                             (unsigned)clen);
                 }
+                rc = ESP_ERR_NO_MEM;
+                /* Drain unread QHTTP body so the next LTE HTTP call is not stuck. */
+                at_transact_locked("AT+QHTTPREAD=80", resp, sizeof(resp), 5000);
             } else {
-                if (out && (rc == ESP_OK || out->error[0] == '\0')) {
-                    snprintf(out->error, sizeof(out->error), "QHTTPREAD fail");
-                }
-                if (rc == ESP_OK) {
-                    rc = read_rc;
+                http_get_buf_ctx_t bctx = {.buf = resp_buf, .cap = resp_buf_len, .used = 0};
+                resp_buf[0] = '\0';
+                esp_err_t read_rc =
+                    http_read_body_stream_locked(clen, http_get_buf_cb, &bctx, resp, sizeof(resp));
+                if (read_rc == ESP_OK) {
+                    if (resp_len) {
+                        *resp_len = bctx.used;
+                    }
+                } else {
+                    if (out && (rc == ESP_OK || out->error[0] == '\0')) {
+                        snprintf(out->error, sizeof(out->error), "QHTTPREAD fail");
+                    }
+                    if (rc == ESP_OK) {
+                        rc = read_rc;
+                    }
                 }
             }
+        } else {
+            at_transact_locked("AT+QHTTPREAD=80", resp, sizeof(resp), 5000);
         }
     } else {
         /* Best-effort drain response body so next call starts clean. */
