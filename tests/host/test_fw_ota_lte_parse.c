@@ -34,6 +34,7 @@ int main(void)
         "\"size\":1}}";
     assert(fw_ota_parse_check_json(none, "1.0.4", &r) == 0);
     assert(r.kind == FW_OTA_CHECK_NO_UPDATE);
+    assert(strcmp(r.latest_version, "1.0.4") == 0);
 
     const char *same =
         "{\"success\":true,\"data\":{\"latestVersion\":\"1.0.4\","
@@ -42,6 +43,7 @@ int main(void)
         "\"size\":1}}";
     assert(fw_ota_parse_check_json(same, "1.0.4", &r) == 0);
     assert(r.kind == FW_OTA_CHECK_NO_UPDATE);
+    assert(strcmp(r.latest_version, "1.0.4") == 0);
 
     const char *fail = "{\"success\":false,\"errorMessage\":\"nope\"}";
     assert(fw_ota_parse_check_json(fail, "1.0.4", &r) == 0);

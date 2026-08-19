@@ -108,6 +108,8 @@ int fw_ota_parse_check_json(const char *json, const char *stripped_current,
     if (!update_available || strcmp(latest_version, stripped_current) == 0 ||
         presigned_url[0] == '\0') {
         out->kind = FW_OTA_CHECK_NO_UPDATE;
+        strncpy(out->latest_version, latest_version, sizeof(out->latest_version) - 1);
+        out->latest_version[sizeof(out->latest_version) - 1] = '\0';
         cJSON_Delete(root);
         return 0;
     }
