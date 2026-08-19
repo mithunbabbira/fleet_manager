@@ -27,7 +27,7 @@ typedef struct {
 } net_lte_status_t;
 
 /**
- * Start LTE bring-up on UART1 (default GPIO17 TX / GPIO16 RX).
+ * Start LTE bring-up on UART1 (default GPIO16 TX / GPIO17 RX).
  *
  * Phase 1: UART AT ping (AT / ATI / CPIN). PPP comes later.
  * Returns ESP_ERR_NOT_SUPPORTED when CONFIG_NET_LTE_ENABLE is unset.
@@ -68,6 +68,21 @@ typedef struct {
  * Treats HTTP 2xx as success. Serializes on the shared UART AT mutex.
  */
 esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out);
+
+typedef struct {
+    const char *authorization;   /* NULL or "" → omit header */
+    const char *system_user_id;  /* NULL or "" → omit header */
+} net_lte_http_req_headers_t;
+
+/**
+ * HTTPS POST with optional request headers and optional response body capture.
+ * When resp_buf is NULL, drains with a short QHTTPREAD (same as net_lte_http_post).
+ * When resp_buf is non-NULL, streams the body into it (NUL-terminated; sets *resp_len).
+ */
+esp_err_t net_lte_http_post_recv(const char *url, const char *body,
+                                 const net_lte_http_req_headers_t *hdr,
+                                 char *resp_buf, size_t resp_buf_len, size_t *resp_len,
+                                 net_lte_http_result_t *out);
 
 /**
  * HTTPS GET into a buffer (for small bodies e.g. OTA manifest JSON).

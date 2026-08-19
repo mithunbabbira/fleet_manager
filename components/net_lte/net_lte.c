@@ -9,6 +9,7 @@
 #include "sdkconfig.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "net_lte";
@@ -726,153 +727,7 @@ static esp_err_t http_set_url_locked(const char *url, char *resp, size_t resp_le
 
 esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out)
 {
-    if (out) {
-        memset(out, 0, sizeof(*out));
-    }
-    if (url == NULL || body == NULL || url[0] == '\0') {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "invalid args");
-        }
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!s_uart_ready || s_uart_mutex == NULL) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "UART not ready");
-        }
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(120000)) != pdTRUE) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "modem busy");
-        }
-        return ESP_ERR_TIMEOUT;
-    }
-
-    char resp[512];
-    esp_err_t rc = ESP_FAIL;
-
-    if (at_transact_locked("AT", resp, sizeof(resp), 1000) != ESP_OK ||
-        strstr(resp, "OK") == NULL) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "AT fail");
-        }
-        goto done;
-    }
-
-    if (ensure_pdp_locked(resp, sizeof(resp)) != ESP_OK) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "PDP/IP fail");
-        }
-        goto done;
-    }
-
-    at_transact_locked("AT+QHTTPCFG=\"contextid\",1", resp, sizeof(resp), 3000);
-    at_transact_locked("AT+QHTTPCFG=\"sslctxid\",1", resp, sizeof(resp), 3000);
-    at_transact_locked("AT+QSSLCFG=\"sslversion\",1,4", resp, sizeof(resp), 3000);
-    at_transact_locked("AT+QSSLCFG=\"seclevel\",1,0", resp, sizeof(resp), 3000);
-    at_transact_locked("AT+QSSLCFG=\"sni\",1,1", resp, sizeof(resp), 3000);
-    at_transact_locked("AT+QHTTPCFG=\"requestheader\",0", resp, sizeof(resp), 3000);
-    /* EC200U content types: 0=urlencoded 1=text/plain 2=octet-stream
-     * 3=multipart 4=application/json (1 caused HTTP 415 from the API). */
-    at_transact_locked("AT+QHTTPCFG=\"contenttype\",4", resp, sizeof(resp), 3000);
-    at_transact_locked("AT+QHTTPCFG=\"responseheader\",0", resp, sizeof(resp), 3000);
-
-    if (http_set_url_locked(url, resp, sizeof(resp)) != ESP_OK) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "QHTTPURL fail");
-        }
-        goto done;
-    }
-
-    size_t body_len = strlen(body);
-    char post_cmd[48];
-    int pn = snprintf(post_cmd, sizeof(post_cmd), "AT+QHTTPPOST=%u,80,80\r",
-                      (unsigned)body_len);
-    uint8_t drain[64];
-    while (uart_read_bytes(CONFIG_NET_LTE_UART_PORT, drain, sizeof(drain), 0) > 0) {
-    }
-    if (uart_write_bytes(CONFIG_NET_LTE_UART_PORT, post_cmd, pn) != pn) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "QHTTPPOST write fail");
-        }
-        goto done;
-    }
-    if (at_wait_token_locked(resp, sizeof(resp), 80000, "CONNECT") != ESP_OK) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "QHTTPPOST no CONNECT");
-        }
-        goto done;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-    if ((size_t)uart_write_bytes(CONFIG_NET_LTE_UART_PORT, body, body_len) != body_len) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "body write fail");
-        }
-        goto done;
-    }
-
-    /* Wait for the +QHTTPPOST URC (arrives in seconds; don't burn the full
-     * window like a fixed collect would), then grab the status digits that
-     * follow the token on the same line. */
-    char urc[384];
-    at_wait_token_locked(urc, sizeof(urc), 90000, "+QHTTPPOST:");
-    {
-        char tail[64];
-        at_collect_locked(tail, sizeof(tail), 300);
-        size_t used = strlen(urc);
-        snprintf(urc + used, sizeof(urc) - used, "%s", tail);
-    }
-    const char *p = strstr(urc, "+QHTTPPOST:");
-    if (p == NULL) {
-        p = strstr(resp, "+QHTTPPOST:");
-    }
-    if (p == NULL) {
-        /* Sometimes status arrives late after OK — one more short collect. */
-        at_collect_locked(urc, sizeof(urc), 5000);
-        p = strstr(urc, "+QHTTPPOST:");
-    }
-    if (p == NULL) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "no QHTTPPOST URC");
-        }
-        goto done;
-    }
-
-    int err = -1;
-    int status = 0;
-    int rlen = 0;
-    if (sscanf(p, "+QHTTPPOST: %d,%d,%d", &err, &status, &rlen) < 2) {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "bad QHTTPPOST parse");
-        }
-        goto done;
-    }
-    if (out) {
-        out->http_status = status;
-    }
-    if (err == 0 && status >= 200 && status < 300) {
-        rc = ESP_OK;
-        strncpy(s_status.last_error, "HTTP POST OK", sizeof(s_status.last_error) - 1);
-        if (out) {
-            out->error[0] = '\0';
-        }
-    } else {
-        if (out) {
-            snprintf(out->error, sizeof(out->error), "HTTP err=%d status=%d", err, status);
-        }
-        snprintf(s_status.last_error, sizeof(s_status.last_error),
-                 "HTTP POST fail status=%d", status);
-        rc = ESP_FAIL;
-    }
-
-    /* Best-effort drain response body so next call starts clean. */
-    at_transact_locked("AT+QHTTPREAD=80", resp, sizeof(resp), 5000);
-
-done:
-    xSemaphoreGive(s_uart_mutex);
-    ESP_LOGI(TAG, "http_post rc=%s status=%d", esp_err_to_name(rc),
-             out ? out->http_status : -1);
-    return rc;
+    return net_lte_http_post_recv(url, body, NULL, NULL, 0, NULL, out);
 }
 
 static esp_err_t http_prepare_get_locked(const char *url, char *resp, size_t resp_len,
@@ -1063,6 +918,313 @@ static esp_err_t http_get_buf_cb(const uint8_t *data, size_t len, void *ctx)
     c->used += len;
     c->buf[c->used] = '\0';
     return ESP_OK;
+}
+
+/* Parse https://host/path?query → host + path_and_query (path starts at '/'). */
+static esp_err_t http_parse_url_host_path(const char *url, char *host, size_t host_len,
+                                          char *path, size_t path_len)
+{
+    const char *p = url;
+    if (strncmp(p, "https://", 8) == 0) {
+        p += 8;
+    } else if (strncmp(p, "http://", 7) == 0) {
+        p += 7;
+    }
+    const char *slash = strchr(p, '/');
+    size_t hlen = slash ? (size_t)(slash - p) : strlen(p);
+    if (hlen == 0 || hlen >= host_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memcpy(host, p, hlen);
+    host[hlen] = '\0';
+    if (slash == NULL) {
+        if (path_len < 2) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        path[0] = '/';
+        path[1] = '\0';
+        return ESP_OK;
+    }
+    if (strlen(slash) >= path_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strncpy(path, slash, path_len - 1);
+    path[path_len - 1] = '\0';
+    return ESP_OK;
+}
+
+esp_err_t net_lte_http_post_recv(const char *url, const char *body,
+                                 const net_lte_http_req_headers_t *hdr,
+                                 char *resp_buf, size_t resp_buf_len, size_t *resp_len,
+                                 net_lte_http_result_t *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (resp_len) {
+        *resp_len = 0;
+    }
+    if (url == NULL || body == NULL || url[0] == '\0') {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "invalid args");
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (resp_buf != NULL && resp_buf_len < 2) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "invalid args");
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_uart_ready || s_uart_mutex == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "UART not ready");
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(120000)) != pdTRUE) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "modem busy");
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    const bool use_hdr = hdr &&
+                         ((hdr->authorization && hdr->authorization[0]) ||
+                          (hdr->system_user_id && hdr->system_user_id[0]));
+
+    char resp[512];
+    esp_err_t rc = ESP_FAIL;
+    char *payload = NULL;
+    size_t payload_len = 0;
+
+    if (at_transact_locked("AT", resp, sizeof(resp), 1000) != ESP_OK ||
+        strstr(resp, "OK") == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "AT fail");
+        }
+        goto done;
+    }
+
+    if (ensure_pdp_locked(resp, sizeof(resp)) != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "PDP/IP fail");
+        }
+        goto done;
+    }
+
+    at_transact_locked("AT+QHTTPCFG=\"contextid\",1", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QHTTPCFG=\"sslctxid\",1", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QSSLCFG=\"sslversion\",1,4", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QSSLCFG=\"seclevel\",1,0", resp, sizeof(resp), 3000);
+    at_transact_locked("AT+QSSLCFG=\"sni\",1,1", resp, sizeof(resp), 3000);
+
+    if (use_hdr) {
+        at_transact_locked("AT+QHTTPCFG=\"requestheader\",1", resp, sizeof(resp), 3000);
+    } else {
+        at_transact_locked("AT+QHTTPCFG=\"requestheader\",0", resp, sizeof(resp), 3000);
+        /* EC200U content types: 0=urlencoded 1=text/plain 2=octet-stream
+         * 3=multipart 4=application/json (1 caused HTTP 415 from the API). */
+        at_transact_locked("AT+QHTTPCFG=\"contenttype\",4", resp, sizeof(resp), 3000);
+    }
+    at_transact_locked("AT+QHTTPCFG=\"responseheader\",0", resp, sizeof(resp), 3000);
+
+    if (http_set_url_locked(url, resp, sizeof(resp)) != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPURL fail");
+        }
+        goto done;
+    }
+
+    size_t body_len = strlen(body);
+    const char *tx = body;
+    size_t tx_len = body_len;
+
+    if (use_hdr) {
+        char host[128];
+        char path[384];
+        if (http_parse_url_host_path(url, host, sizeof(host), path, sizeof(path)) != ESP_OK) {
+            if (out) {
+                snprintf(out->error, sizeof(out->error), "URL parse fail");
+            }
+            goto done;
+        }
+        size_t cap = body_len + strlen(host) + strlen(path) + 512;
+        payload = (char *)malloc(cap);
+        if (payload == NULL) {
+            if (out) {
+                snprintf(out->error, sizeof(out->error), "payload OOM");
+            }
+            rc = ESP_ERR_NO_MEM;
+            goto done;
+        }
+        int n = snprintf(payload, cap,
+                         "POST %s HTTP/1.1\r\n"
+                         "Host: %s\r\n"
+                         "Content-Type: application/json\r\n"
+                         "Content-Length: %u\r\n",
+                         path, host, (unsigned)body_len);
+        if (n < 0 || (size_t)n >= cap) {
+            if (out) {
+                snprintf(out->error, sizeof(out->error), "payload build fail");
+            }
+            goto done;
+        }
+        if (hdr->authorization && hdr->authorization[0]) {
+            int a = snprintf(payload + n, cap - (size_t)n, "Authorization: %s\r\n",
+                             hdr->authorization);
+            if (a < 0 || (size_t)a >= cap - (size_t)n) {
+                if (out) {
+                    snprintf(out->error, sizeof(out->error), "payload build fail");
+                }
+                goto done;
+            }
+            n += a;
+        }
+        if (hdr->system_user_id && hdr->system_user_id[0]) {
+            int s = snprintf(payload + n, cap - (size_t)n, "x-nc-system-user-id: %s\r\n",
+                             hdr->system_user_id);
+            if (s < 0 || (size_t)s >= cap - (size_t)n) {
+                if (out) {
+                    snprintf(out->error, sizeof(out->error), "payload build fail");
+                }
+                goto done;
+            }
+            n += s;
+        }
+        if ((size_t)n + 2 + body_len >= cap) {
+            if (out) {
+                snprintf(out->error, sizeof(out->error), "payload build fail");
+            }
+            goto done;
+        }
+        payload[n++] = '\r';
+        payload[n++] = '\n';
+        memcpy(payload + n, body, body_len);
+        n += (int)body_len;
+        payload[n] = '\0';
+        payload_len = (size_t)n;
+        tx = payload;
+        tx_len = payload_len;
+    }
+
+    char post_cmd[48];
+    int pn = snprintf(post_cmd, sizeof(post_cmd), "AT+QHTTPPOST=%u,80,80\r",
+                      (unsigned)tx_len);
+    uint8_t drain[64];
+    while (uart_read_bytes(CONFIG_NET_LTE_UART_PORT, drain, sizeof(drain), 0) > 0) {
+    }
+    if (uart_write_bytes(CONFIG_NET_LTE_UART_PORT, post_cmd, pn) != pn) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPPOST write fail");
+        }
+        goto done;
+    }
+    if (at_wait_token_locked(resp, sizeof(resp), 80000, "CONNECT") != ESP_OK) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "QHTTPPOST no CONNECT");
+        }
+        goto done;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if ((size_t)uart_write_bytes(CONFIG_NET_LTE_UART_PORT, tx, tx_len) != tx_len) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "body write fail");
+        }
+        goto done;
+    }
+
+    /* Wait for the +QHTTPPOST URC (arrives in seconds; don't burn the full
+     * window like a fixed collect would), then grab the status digits that
+     * follow the token on the same line. */
+    char urc[384];
+    at_wait_token_locked(urc, sizeof(urc), 90000, "+QHTTPPOST:");
+    {
+        char tail[64];
+        at_collect_locked(tail, sizeof(tail), 300);
+        size_t used = strlen(urc);
+        snprintf(urc + used, sizeof(urc) - used, "%s", tail);
+    }
+    const char *p = strstr(urc, "+QHTTPPOST:");
+    if (p == NULL) {
+        p = strstr(resp, "+QHTTPPOST:");
+    }
+    if (p == NULL) {
+        /* Sometimes status arrives late after OK — one more short collect. */
+        at_collect_locked(urc, sizeof(urc), 5000);
+        p = strstr(urc, "+QHTTPPOST:");
+    }
+    if (p == NULL) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "no QHTTPPOST URC");
+        }
+        goto done;
+    }
+
+    int err = -1;
+    int status = 0;
+    int rlen = 0;
+    if (sscanf(p, "+QHTTPPOST: %d,%d,%d", &err, &status, &rlen) < 2) {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "bad QHTTPPOST parse");
+        }
+        goto done;
+    }
+    if (out) {
+        out->http_status = status;
+    }
+    if (err == 0 && status >= 200 && status < 300) {
+        rc = ESP_OK;
+        strncpy(s_status.last_error, "HTTP POST OK", sizeof(s_status.last_error) - 1);
+        if (out) {
+            out->error[0] = '\0';
+        }
+    } else {
+        if (out) {
+            snprintf(out->error, sizeof(out->error), "HTTP err=%d status=%d", err, status);
+        }
+        snprintf(s_status.last_error, sizeof(s_status.last_error),
+                 "HTTP POST fail status=%d", status);
+        rc = ESP_FAIL;
+    }
+
+    if (resp_buf != NULL) {
+        size_t clen = (rlen > 0) ? (size_t)rlen : 0;
+        if (clen > 0 && clen >= resp_buf_len) {
+            if (out) {
+                snprintf(out->error, sizeof(out->error), "response too large (%u)",
+                         (unsigned)clen);
+            }
+            rc = ESP_ERR_NO_MEM;
+        } else {
+            http_get_buf_ctx_t bctx = {.buf = resp_buf, .cap = resp_buf_len, .used = 0};
+            resp_buf[0] = '\0';
+            esp_err_t read_rc =
+                http_read_body_stream_locked(clen, http_get_buf_cb, &bctx, resp, sizeof(resp));
+            if (read_rc == ESP_OK) {
+                if (resp_len) {
+                    *resp_len = bctx.used;
+                }
+            } else {
+                if (out && (rc == ESP_OK || out->error[0] == '\0')) {
+                    snprintf(out->error, sizeof(out->error), "QHTTPREAD fail");
+                }
+                if (rc == ESP_OK) {
+                    rc = read_rc;
+                }
+            }
+        }
+    } else {
+        /* Best-effort drain response body so next call starts clean. */
+        at_transact_locked("AT+QHTTPREAD=80", resp, sizeof(resp), 5000);
+    }
+
+done:
+    free(payload);
+    xSemaphoreGive(s_uart_mutex);
+    ESP_LOGI(TAG, "http_post_recv rc=%s status=%d len=%u", esp_err_to_name(rc),
+             out ? out->http_status : -1, (unsigned)(resp_len ? *resp_len : 0));
+    return rc;
 }
 
 /*
@@ -1264,8 +1426,22 @@ esp_err_t net_lte_gps_get(net_lte_gps_t *out)
 
 esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_result_t *out)
 {
+    return net_lte_http_post_recv(url, body, NULL, NULL, 0, NULL, out);
+}
+
+esp_err_t net_lte_http_post_recv(const char *url, const char *body,
+                                 const net_lte_http_req_headers_t *hdr,
+                                 char *resp_buf, size_t resp_buf_len, size_t *resp_len,
+                                 net_lte_http_result_t *out)
+{
     (void)url;
     (void)body;
+    (void)hdr;
+    (void)resp_buf;
+    (void)resp_buf_len;
+    if (resp_len) {
+        *resp_len = 0;
+    }
     if (out) {
         memset(out, 0, sizeof(*out));
         snprintf(out->error, sizeof(out->error), "CONFIG_NET_LTE_ENABLE=n");
