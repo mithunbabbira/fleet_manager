@@ -1036,110 +1036,27 @@ static esp_err_t api_ota_get(httpd_req_t *req)
  * LTE OTA endpoints (/api/ota/lte):
  *
  * - GET  /api/ota/lte
- *      Returns current LTE OTA config (manifest_url/channel/device_id/force),
- *      plus live phase/error and the latest seen manifest/applied versions.
+ *      Returns current LTE OTA config (firmware_check_url/device_id/force),
+ *      plus live phase/error, Trafyn check fields (current_version,
+ *      update_available, latest/manifest_version), and download progress.
  *
  * - POST /api/ota/lte
- *      Saves fields into NVS (see fw_ota_lte.c):
- *        manifest_url, channel, device_id, force
+ *      Accepts only device_id and force (persisted to NVS).
+ *      Ignores manifest_url / channel if present — SoftAP must not set the
+ *      firmware-check URL (Kconfig / serial `ota url` only).
  *      Then returns GET /api/ota/lte.
  *
  * - POST /api/ota/lte/run
- *      Starts fw_ota_lte in the background (LTE GET manifest + download +
- *      flash inactive OTA slot + reboot).
+ *      Starts fw_ota_lte in the background (Trafyn POST firmware-check +
+ *      stream bin + flash inactive OTA slot + reboot).
  *
- * Auto-check (boot-time / periodic) uses force=false and the same URL stored
- * in NVS.
+ * Auto-check (boot-time / periodic) uses force=false and the same check URL
+ * (Kconfig default or NVS ota_manif override).
  */
-#define OTA_RECV_CHUNK 4096
-
 static esp_err_t api_ota_post(httpd_req_t *req)
 {
-    if (fw_ota_lte_is_busy() || fw_ota_is_busy()) {
-        return send_error_json(req, "409 Conflict", "busy", "OTA already in progress");
-    }
-
-    char size_hdr[24] = {0};
-    char sha_hdr[72] = {0};
-
-    if (httpd_req_get_hdr_value_str(req, "X-Firmware-Size", size_hdr, sizeof(size_hdr)) != ESP_OK) {
-        return send_error_json(req, HTTPD_400, "missing_header", "X-Firmware-Size required");
-    }
-    if (httpd_req_get_hdr_value_str(req, "X-Firmware-Sha256", sha_hdr, sizeof(sha_hdr)) != ESP_OK) {
-        return send_error_json(req, HTTPD_400, "missing_header", "X-Firmware-Sha256 required");
-    }
-
-    /* Trim whitespace/newlines from sha header */
-    size_t sha_len = strlen(sha_hdr);
-    while (sha_len > 0 && isspace((unsigned char)sha_hdr[sha_len - 1])) {
-        sha_hdr[--sha_len] = '\0';
-    }
-
-    char *end = NULL;
-    unsigned long expected = strtoul(size_hdr, &end, 10);
-    if (end == size_hdr || expected == 0) {
-        return send_error_json(req, HTTPD_400, "bad_size", "X-Firmware-Size invalid");
-    }
-    if (req->content_len > 0 && (size_t)req->content_len != (size_t)expected) {
-        return send_error_json(req, HTTPD_400, "size_mismatch",
-                               "Content-Length does not match X-Firmware-Size");
-    }
-
-    esp_err_t err = fw_ota_begin((size_t)expected, sha_hdr);
-    if (err == ESP_ERR_INVALID_STATE) {
-        return send_error_json(req, "409 Conflict", "busy", "OTA already in progress");
-    }
-    if (err != ESP_OK) {
-        fw_ota_status_t st;
-        fw_ota_get_status(&st);
-        return send_error_json(req, HTTPD_400, "begin_failed",
-                               st.error[0] ? st.error : esp_err_to_name(err));
-    }
-
-    uint8_t *buf = malloc(OTA_RECV_CHUNK);
-    if (!buf) {
-        fw_ota_abort();
-        return send_error_json(req, HTTPD_500, "no_mem", NULL);
-    }
-
-    size_t remaining = (size_t)expected;
-    while (remaining > 0) {
-        int to_read = (int)((remaining > OTA_RECV_CHUNK) ? OTA_RECV_CHUNK : remaining);
-        int got = httpd_req_recv(req, (char *)buf, to_read);
-        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
-        }
-        if (got <= 0) {
-            free(buf);
-            fw_ota_abort();
-            return send_error_json(req, HTTPD_500, "recv_failed", "connection closed early");
-        }
-        err = fw_ota_write(buf, (size_t)got);
-        if (err != ESP_OK) {
-            free(buf);
-            fw_ota_status_t st;
-            fw_ota_get_status(&st);
-            return send_error_json(req, HTTPD_500, "write_failed",
-                                   st.error[0] ? st.error : esp_err_to_name(err));
-        }
-        remaining -= (size_t)got;
-    }
-    free(buf);
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "status", "ok");
-    cJSON_AddStringToObject(root, "message", "verified; rebooting into new partition");
-    esp_err_t send_err = send_ok_json(req, root);
-    if (send_err != ESP_OK) {
-        ESP_LOGW(TAG, "OTA response send failed: %s (still finalizing)", esp_err_to_name(send_err));
-    }
-
-    err = fw_ota_end_and_reboot();
-    /* Only reached on failure */
-    fw_ota_status_t st;
-    fw_ota_get_status(&st);
-    ESP_LOGE(TAG, "fw_ota_end_and_reboot failed: %s (%s)", esp_err_to_name(err), st.error);
-    return ESP_FAIL;
+    return send_error_json(req, "405 Method Not Allowed", "upload_disabled",
+                           "firmware updates are LTE-only");
 }
 
 static esp_err_t api_ota_handler(httpd_req_t *req)
@@ -1173,6 +1090,7 @@ static esp_err_t api_ota_lte_get(httpd_req_t *req)
     fw_ota_get_status(&ost);
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "manifest_url", cfg.manifest_url);
+    cJSON_AddStringToObject(root, "firmware_check_url", cfg.manifest_url);
     cJSON_AddStringToObject(root, "channel", cfg.channel);
     cJSON_AddStringToObject(root, "device_id", cfg.device_id);
     cJSON_AddBoolToObject(root, "force", cfg.force);
@@ -1182,6 +1100,8 @@ static esp_err_t api_ota_lte_get(httpd_req_t *req)
     cJSON_AddStringToObject(root, "error", st.error);
     cJSON_AddStringToObject(root, "manifest_version", st.manifest_version);
     cJSON_AddStringToObject(root, "applied_version", st.applied_version);
+    cJSON_AddStringToObject(root, "current_version", st.current_version);
+    cJSON_AddBoolToObject(root, "update_available", st.update_available);
     cJSON_AddNumberToObject(root, "http_status", st.http_status);
     cJSON_AddNumberToObject(root, "bytes_downloaded", (double)st.bytes_downloaded);
     cJSON_AddBoolToObject(root, "busy", fw_ota_lte_is_busy() || fw_ota_is_busy());
@@ -1202,16 +1122,9 @@ static esp_err_t api_ota_lte_post(httpd_req_t *req)
     }
     fw_ota_lte_config_t cfg;
     fw_ota_lte_get_config(&cfg);
-    cJSON *u = cJSON_GetObjectItem(json, "manifest_url");
-    cJSON *ch = cJSON_GetObjectItem(json, "channel");
+    /* Ignore manifest_url / channel — SoftAP must not override check URL. */
     cJSON *did = cJSON_GetObjectItem(json, "device_id");
     cJSON *force = cJSON_GetObjectItem(json, "force");
-    if (cJSON_IsString(u)) {
-        snprintf(cfg.manifest_url, sizeof(cfg.manifest_url), "%s", u->valuestring);
-    }
-    if (cJSON_IsString(ch)) {
-        snprintf(cfg.channel, sizeof(cfg.channel), "%s", ch->valuestring);
-    }
     if (cJSON_IsString(did)) {
         snprintf(cfg.device_id, sizeof(cfg.device_id), "%s", did->valuestring);
     }

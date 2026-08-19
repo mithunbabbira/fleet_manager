@@ -138,20 +138,13 @@ static void cmd_ota_status(void)
            ost.fw_version, ost.running_partition, ost.update_partition, (int)ost.state,
            ost.pending_verify ? "yes" : "no",
            (fw_ota_is_busy() || fw_ota_lte_is_busy()) ? "yes" : "no");
-    printf("lte_ota: phase=%s manif_ver=%s applied=%s http=%d dl=%u err=\"%s\"\n",
-           ota_lte_phase_str(lst.phase), lst.manifest_version, lst.applied_version,
+    printf("lte_ota: phase=%s current=%s latest=%s update_available=%s applied=%s http=%d dl=%u err=\"%s\"\n",
+           ota_lte_phase_str(lst.phase), lst.current_version, lst.manifest_version,
+           lst.update_available ? "yes" : "no", lst.applied_version,
            lst.http_status, (unsigned)lst.bytes_downloaded, lst.error);
     printf("cfg: force=%s channel=%s device_id=%s\n",
            cfg.force ? "on" : "off", cfg.channel, cfg.device_id);
     printf("url: %s\n", cfg.manifest_url);
-}
-
-static void ota_strip_query(char *url)
-{
-    char *q = strchr(url, '?');
-    if (q) {
-        *q = '\0';
-    }
 }
 
 /*
@@ -159,7 +152,8 @@ static void ota_strip_query(char *url)
  *
  * - `ota status`
  *     Prints fw_ota status (expected/bytes written, which partition is next)
- *     and fw_ota_lte status (current phase/error, last manifest/applied versions).
+ *     and fw_ota_lte status (phase/error, current_version, update_available,
+ *     latest/applied versions).
  *
  * - `ota run`
  *     Triggers fw_ota_lte_start_background() immediately.
@@ -167,13 +161,12 @@ static void ota_strip_query(char *url)
  *
  * - `ota force on|off`
  *     Persists the force flag into NVS (fw_ota_lte NVS key: ota_force).
- *     When force is ON, version match will not skip the manifest download.
+ *     When force is ON, version match will not skip the firmware download.
  *
- * - `ota url <manifest-url>`
- *     Persists the base manifest URL into NVS (fw_ota_lte NVS key: ota_manif).
- *     The device appends: ?device_id=<id>&channel=<channel> at request time.
- *     We strip the input query string so users don't accidentally double-add
- *     device_id/channel parameters.
+ * - `ota url <firmware-check-url>`
+ *     Persists the firmware-check POST URL into NVS (key: ota_manif).
+ *     Saved as typed — do not strip ?refreshCache=true.
+ *     Device does NOT append device_id/channel query params anymore.
  */
 static void cmd_ota(char *args)
 {
@@ -216,13 +209,12 @@ static void cmd_ota(char *args)
     }
     if (strcmp(sub, "url") == 0) {
         if (!rest || !rest[0]) {
-            printf("usage: ota url <manifest-url>\n");
+            printf("usage: ota url <firmware-check-url>\n");
             return;
         }
         fw_ota_lte_config_t cfg;
         fw_ota_lte_get_config(&cfg);
         snprintf(cfg.manifest_url, sizeof(cfg.manifest_url), "%s", rest);
-        ota_strip_query(cfg.manifest_url);
         printf("ota url: %s\n", esp_err_to_name(fw_ota_lte_set_config(&cfg)));
         return;
     }
