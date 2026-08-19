@@ -1,5 +1,0 @@
-{
-  "version": "1.0.3-lab",
-  "bin": "firmware/1.0.3-lab/elm327_esp32c6.bin",
-  "channel": "stable"
-}

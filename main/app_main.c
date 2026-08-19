@@ -59,10 +59,10 @@ static void can_boot_task(void *arg)
  * Fleet telematics node entry (runs from whichever OTA slot otadata selected:
  * ota_0 or ota_1). Boot order matters:
  *
- *  1) NVS          — settings survive OTA (manifest URL, uplink, profiles, …)
+ *  1) NVS          — settings survive OTA (Trafyn host, uplink, profiles, …)
  *  2) fw_ota*      — dual-bank flash writer + LTE OTA client (loads ota_manif)
  *  3) profiles/bus — OBD poll config + in-process telemetry pub/sub
- *  4) LTE + auto   — EC200U UART; then background GET /firmware/manifest
+ *  4) LTE + auto   — EC200U UART; then background Trafyn firmware-check POST
  *  5) SPI + CAN    — MCP2515 on SPI2 (shared bus with SD)
  *  6) store_sd     — microSD mount on same SPI2 (CS GPIO18)
  *  7) uplink       — produce→SD queue, drain→batch HTTPS POST
@@ -70,7 +70,7 @@ static void can_boot_task(void *arg)
  *  9) OTA confirm  — mark pending image valid (lab SoftAP health gate)
  * 10) poller       — OBD PID polling (enabled by can_boot_task when link up)
  *
- * LTE auto-check (fw_ota_lte_start_auto): wait for registration → GET manifest →
+ * LTE auto-check (fw_ota_lte_start_auto): wait for registration → POST check →
  * compare version → stream .bin into inactive ota_X → update otadata → reboot.
  * SoftAP/serial can still trigger the same path manually.
  */
@@ -88,7 +88,7 @@ void app_main(void)
     ESP_ERROR_CHECK(sys_runtime_init());
     ESP_LOGI(TAG, "sys_runtime ready");
 
-    /* Dual-bank writer (ota_0/ota_1) + LTE orchestrator (manifest GET / download). */
+    /* Dual-bank writer (ota_0/ota_1) + LTE orchestrator (Trafyn check / download). */
     ESP_ERROR_CHECK(fw_ota_init());
     ESP_LOGI(TAG, "fw_ota ready");
     ESP_ERROR_CHECK(fw_ota_lte_init());
@@ -105,9 +105,9 @@ void app_main(void)
     ESP_LOGI(TAG, "telemetry_bus ready");
 
     /*
-     * LTE (EC200U on UART1: GPIO17 TX / GPIO16 RX).
+     * LTE (EC200U on UART1: GPIO16 TX / GPIO17 RX).
      * Bring-up is background; once AT works, start OTA auto-check task
-     * (waits ~90s for registration, then GET manifest every 24h by default).
+     * (waits ~90s for registration, then Trafyn firmware-check POST every 24h).
      */
     {
         esp_err_t lte_err = net_lte_start();

@@ -14,4 +14,3 @@ examples/**/sdkconfig
 .worktrees/
 .superpowers/
 .cache/
-tools/ota_dev_server/firmware/**/*.bin

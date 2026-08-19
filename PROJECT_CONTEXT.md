@@ -1,17 +1,23 @@
 # ESP32-C6 Fleet Telematics — Project Context
 
-> Last updated: 2026-08-03 on `feature/mcp2515-can`.
+> Last updated: 2026-08-18 on the printed carrier PCB.
 >
-> The production data path is direct vehicle CAN through MCP2515. Local access is
-> USB Serial/JTAG plus Wi-Fi SoftAP/HTTP, and cloud telemetry uses a Quectel EC200U
-> LTE modem. The retired wireless OBD adapter stack has been deleted.
+> Production data path: vehicle CAN through MCP2515. Local access: USB
+> Serial/JTAG plus Wi-Fi SoftAP/HTTP. Cloud: Quectel EC200U. The BLE ELM327
+> adapter stack has been deleted.
 >
-> Flash layout is dual-bank OTA (`ota_0` + `ota_1`). Lab manifest + `.bin` host:
-> `tools/ota_dev_server/`. Design: `docs/superpowers/specs/2026-07-31-lte-ota-design.md`.
+> Authoritative pin map:
+> `hardware/fleet_telematics_carrier/README.md`
+> Fabricated gerbers: `Vehical_Telematics_Design.zip` (KiCad 9, 2026-08-12).
+>
+> Flash layout is dual-bank OTA (`ota_0` + `ota_1`). LTE firmware check: Trafyn
+> POST `get-latest-device-firmware` (see
+> `docs/superpowers/specs/2026-08-19-trafyn-firmware-ota-design.md`). SoftAP
+> does not upload firmware.
 
 ## Product
 
-ESP-IDF firmware (CMake project name `elm327_esp32c6`) for an ESP32-C6 Mini. It:
+ESP-IDF firmware (CMake project name `elm327_esp32c6`) for an ESP32-C6 Super Mini. It:
 
 - detects ISO 15765-4 CAN at 11/29-bit identifiers and 500/250 kbit/s;
 - polls profile-driven OBD PIDs and decodes PIDs, DTCs, and VIN;
@@ -20,21 +26,28 @@ ESP-IDF firmware (CMake project name `elm327_esp32c6`) for an ESP32-C6 Mini. It:
 - posts telemetry through an EC200U using Quectel HTTPS commands.
 
 The default profile is `fleet_basic`. The CAN path was validated in-car on
-2026-07-29 with CAN11/500 and live RPM, speed, coolant, and throttle data.
+2026-07-29 (CAN11/500, live RPM/speed/coolant/throttle). The printed carrier
+was validated on the bench on 2026-08-18 (MCP SPI, microSD, LTE AT on Airtel).
 
-## Hardware
+## Hardware (printed PCB — what firmware uses)
 
 | Item | Detail |
 |---|---|
-| MCU | ESP32-C6 Mini, 4 MB flash |
-| CAN | MCP2515 over SPI through TXS0108E level shifter; GPIO21 SCK, GPIO22 MOSI, GPIO23 MISO, GPIO20 CS, GPIO14 INT |
+| MCU | ESP32-C6 Super Mini, 4 MB flash |
+| CAN | MCP2515 over **soft-SPI** through TXS0108E; GPIO21 SCK, 22 MOSI, 23 MISO, 20 CS, 14 INT |
+| TXS map | A1/B1 CS, A2/B2 SO/MISO, A3/B3 SI/MOSI, A4/B4 SCK, A5/B5 INT |
+| microSD | Hardware SPI2 GPIO4 SCK, 5 MOSI, 6 MISO, 18 CS |
 | Console | USB Serial/JTAG, 115200 8N1 |
 | Wi-Fi | SoftAP `Fleet-C6`, password `fleetc61`, UI at `http://192.168.4.1/` |
-| LTE | Quectel EC200U on UART1; GPIO17 TX, GPIO16 RX, 115200 8N1 |
+| LTE | EC200U UART1: **GPIO16 ESP-TX → modem RX**, **GPIO17 ESP-RX ← modem TX**, 115200 8N1 |
 | APN | `airtelgprs.com` by default |
 
-The modem requires its own suitable supply, PWRKEY sequencing, and common ground.
-UART1 is reserved for LTE.
+The modem needs its own VBAT, PWRKEY, and common ground. UART1 is reserved for
+LTE. Firmware UART pins match the printed copper; **do not respin the PCB**
+for RX/TX, and **do not flash** images that still use TX=17 / RX=16.
+
+Not used: jumper-wire prototype harness, shared MCP+SD SPI bus, textbook
+GPIO17=ESP-TX / GPIO16=ESP-RX map.
 
 ## Build and test
 
@@ -59,7 +72,7 @@ Important defaults:
 - USB Serial/JTAG console;
 - Bluetooth disabled; SoftAP enabled;
 - OBD command timeout 12 seconds;
-- LTE enabled with the Airtel APN above.
+- LTE enabled with the Airtel APN and UART TX=16 / RX=17.
 
 ## Active components
 
@@ -78,9 +91,6 @@ components/
 ├── transport_http/      SoftAP, REST API, and embedded web UI
 └── transport_serial/    USB interactive console
 ```
-
-The old wireless adapter transport, client, and radio components no longer
-exist or participate in CMake.
 
 ## Data flow
 
@@ -103,7 +113,7 @@ detection and pauses while the CAN link is unavailable.
 
 1. Initialize NVS, runtime metrics/watchdog, profiles, and telemetry bus.
 2. Start LTE (OTA auto-check); failures are non-fatal.
-3. Init SPI2 mutex → MCP2515 (`can_obd`) → microSD (`store_sd`).
+3. Init SPI CS idle-high → MCP2515 soft-SPI (`can_obd`) → microSD SPI2 (`store_sd`).
 4. Start telemetry uplink (produce→SD queue, drain→batch POST).
 5. Start serial and SoftAP/HTTP transports; confirm OTA if pending.
 6. Start `obd_poller` paused; CAN boot task enables it when an ECU responds.
@@ -127,9 +137,12 @@ card is missing, it falls back to live single-event POST. SoftAP/serial status
 exposes queue depth, SD mount state, and GNSS fix (`uplink` command). See
 `docs/superpowers/specs/2026-08-06-sd-uplink-queue-design.md`.
 
+Bench 2026-08-18: modem registered on Airtel (`csq=18`); HTTP left the module
+(server 400 is an API/payload issue, not a UART failure).
+
 ## Known follow-up work
 
-- Validate the full build, image size, and hardware behavior after stack removal.
-- Complete production OTA support (`sys_runtime` currently exposes a stub).
+- Confirm OBD ECU replies on a live vehicle CAN bus with this PCB.
+- Production OTA beyond the current LTE/SoftAP lab path.
 - Keep legacy NVS namespace/key names only where changing them would require an
   explicit migration.

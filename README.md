@@ -5,18 +5,26 @@ serves local diagnostics over a **Wi-Fi SoftAP** and USB console, and uploads
 telemetry through a **Quectel EC200U LTE modem**. Vehicle commands pass through a
 read-only safety policy.
 
-Design and implementation notes live under [`docs/superpowers/`](docs/superpowers/):
+Pin map and printed-PCB wiring:
+[`hardware/fleet_telematics_carrier/README.md`](hardware/fleet_telematics_carrier/README.md).
 
-- [Design spec](docs/superpowers/specs/2026-07-09-elm327-esp32c6-design.md)
-- [Implementation plan](docs/superpowers/plans/2026-07-09-elm327-esp32c6-implementation.md)
+Design notes live under [`docs/superpowers/`](docs/superpowers/). Early BLE/ELM327
+docs are historical only ([`docs/archive/`](docs/archive/)).
 
 ## Hardware requirements
 
+Use the **printed carrier PCB** (`Vehical_Telematics_Design.zip`). Do not
+recreate the old jumper harness or fab the retired Python Gerber draft.
+
 | Item | Notes |
 |---|---|
-| **ESP32-C6 Mini** | **4 MB flash** (ESP32-C6FH4 and similar). Partition table: `factory` + one `ota_0` slot. |
-| **MCP2515 module** | SPI CAN controller connected to the vehicle OBD-II CAN-H/CAN-L lines; protocol detection covers 11/29-bit IDs at 500/250 kbit/s. |
-| **Quectel EC200U** | LTE modem on UART1: GPIO17 TX, GPIO16 RX, 115200 8N1. Use a separate suitable supply and common ground. |
+| **ESP32-C6 Super Mini** | **4 MB flash**. Dual-bank OTA: `ota_0` + `ota_1`. |
+| **MCP2515 + TXS0108E** | Soft-SPI GPIO21 SCK, 22 MOSI, 23 MISO, 20 CS, 14 INT (3.3 V ↔ 5 V). |
+| **microSD** | Dedicated SPI2: GPIO4 SCK, 5 MOSI, 6 MISO, 18 CS. |
+| **Quectel EC200U** | UART1 **GPIO16 TX → modem RX**, **GPIO17 RX ← modem TX**, 115200 8N1. Separate VBAT + common GND. |
+
+Full TXS channel table and LTE UART notes are in the hardware README. Firmware
+already matches the printed LTE copper; a PCB respin is not required for RX/TX.
 
 ## Build and flash
 
@@ -39,7 +47,7 @@ On boot the device starts a Wi-Fi SoftAP for the web UI and REST API:
 | Setting | Default |
 |---|---|
 | SSID | `Fleet-C6` |
-| Password | `fleetc6` |
+| Password | `fleetc61` |
 | Web UI | [http://192.168.4.1/](http://192.168.4.1/) |
 
 Values are configurable via Kconfig (`main/Kconfig.projbuild`) or menuconfig.
@@ -76,6 +84,14 @@ All OBD traffic passes through `cmd_policy` before reaching the CAN bus:
 Blocked commands return an error on serial and HTTP 403 on the web API; the
 vehicle never receives them.
 
+## Firmware OTA
+
+Over LTE, the device POSTs to Trafyn `get-latest-device-firmware` to check for
+updates and streams the presigned `.bin` URL when a newer version is available.
+The SoftAP web UI does not accept firmware uploads—it reports OTA stats and
+`device_id` only. See
+[`docs/superpowers/specs/2026-08-19-trafyn-firmware-ota-design.md`](docs/superpowers/specs/2026-08-19-trafyn-firmware-ota-design.md).
+
 ## Host tests
 
 Pure-logic components (`cmd_policy`, `obd_codec`) have host-side unit tests that run without hardware:
@@ -105,14 +121,15 @@ app_main
   → obd_codec            (PID decode, DTC/VIN helpers)
 ```
 
-The legacy wireless adapter components were deleted; the MCP2515 is the only
-vehicle data path.
+The BLE ELM327 adapter stack was deleted; the MCP2515 is the only vehicle data
+path.
 
 ## On-device bring-up checklist
 
-> **For the operator:** complete this checklist on real hardware after flashing. On-device validation has **not** been performed as part of firmware development in CI — tick each item in your PR or lab notes.
+Lab (printed PCB, 2026-08-18): MCP detect, SD mount, and LTE AT/Airtel
+registration passed. CAN ECU replies still need a vehicle on the bus.
 
-- [ ] SoftAP **`Fleet-C6`** appears; join with password **`fleetc6`**; open [http://192.168.4.1/](http://192.168.4.1/)
+- [ ] SoftAP **`Fleet-C6`** appears; join with password **`fleetc61`**; open [http://192.168.4.1/](http://192.168.4.1/)
 - [ ] Serial `status` reports `can_ready=yes` and the detected CAN protocol
 - [ ] `cmd 010C` returns engine RPM data
 - [ ] `cmd 04` is **blocked** (policy error / HTTP 403); vehicle never receives it

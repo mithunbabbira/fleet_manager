@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Keep in sync with tools/ota_dev_server publish folder name / backend manifest.version
+# Keep in sync with VERSION file / Trafyn currentVersion (strip before first dash)
 file(READ "${CMAKE_SOURCE_DIR}/VERSION" PROJECT_VER_RAW)
 string(STRIP "${PROJECT_VER_RAW}" PROJECT_VER)
 
