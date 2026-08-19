@@ -19,7 +19,7 @@ typedef enum {
 } fw_ota_lte_phase_t;
 
 typedef struct {
-    char manifest_url[192];
+    char manifest_url[256]; /* firmware-check POST URL (NVS/UI name kept) */
     char channel[24];
     char device_id[40];
     bool force;
@@ -28,8 +28,10 @@ typedef struct {
 typedef struct {
     fw_ota_lte_phase_t phase;
     char error[96];
-    char manifest_version[40];
+    char manifest_version[40]; /* latestVersion from check response */
     char applied_version[40];
+    char current_version[24];  /* stripped value sent in POST */
+    bool update_available;
     int http_status;
     size_t bytes_downloaded;
 } fw_ota_lte_status_t;

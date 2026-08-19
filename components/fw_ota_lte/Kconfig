@@ -1,19 +1,45 @@
 menu "Firmware LTE OTA (fw_ota_lte)"
 
     config FW_OTA_LTE_AUTO_CHECK
-        bool "Auto-check manifest after LTE is up"
+        bool "Auto-check firmware after LTE is up"
         default y
         help
-            After boot, wait for cellular registration then GET the manifest.
+            After boot, wait for cellular registration then POST firmware-check.
             Repeats every FW_OTA_LTE_AUTO_INTERVAL_H hours. Force is always off
             for auto checks (SoftAP/serial Force still works for lab).
 
-    config FW_OTA_LTE_DEFAULT_MANIFEST_URL
-        string "Default manifest URL (used when NVS empty)"
-        default "https://d949-2402-e280-210a-4bd-88a5-efd3-8de3-4a38.ngrok-free.app/firmware/manifest"
+    config FW_OTA_LTE_CHECK_URL
+        string "Firmware-check POST URL"
+        default "https://api.trafyn.info/workflow-engine/realm/1/user/1/v1/execution/service/runWithNoAuth/get-latest-device-firmware?refreshCache=true"
         help
-            Lab ngrok URL for now. Replace with CM/prod when ready.
-            SoftAP or serial "ota url" overrides this in NVS.
+            Auto-check POSTs this URL for get-latest-device-firmware.
+            NVS ota_manif overrides if non-empty. SoftAP/serial can also set it.
+
+    config FW_OTA_LTE_AUTH_HEADER
+        string "Optional Authorization header value (empty = omit)"
+        default ""
+        help
+            If non-empty, sent as Authorization on the firmware-check POST.
+            Leave empty to omit the header. Do not commit secrets here.
+
+    config FW_OTA_LTE_SYSTEM_USER_ID
+        string "Optional x-nc-system-user-id (empty = omit)"
+        default ""
+        help
+            If non-empty, sent as x-nc-system-user-id on the firmware-check POST.
+            Leave empty to omit the header.
+
+    config FW_OTA_LTE_MANUFACTURER
+        string "Trafyn manufacturer"
+        default "Espressif Systems"
+        help
+            Value for input.manufacturer in the firmware-check POST body.
+
+    config FW_OTA_LTE_DEVICE_TYPE
+        string "Trafyn deviceType"
+        default "fleet monitor"
+        help
+            Value for input.deviceType in the firmware-check POST body.
 
     config FW_OTA_LTE_AUTO_WAIT_SEC
         int "Max seconds to wait for LTE registration before first check"

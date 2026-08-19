@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "fw_ota.h"
+#include "fw_ota_lte_parse.h"
 #include "net_lte.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -14,6 +15,7 @@
 #include "cJSON.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "fw_ota_lte";
@@ -27,12 +29,11 @@ static const char *TAG = "fw_ota_lte";
  * - NVS survives app upgrades so the device keeps the same LTE host/APN/device_id.
  *
  * Keys:
- * - ota_manif: base manifest URL (e.g. https://.../firmware/manifest)
- *              The device appends: ?device_id=<id>&channel=<channel>
- * - ota_chan:  manifest channel string (currently "stable")
+ * - ota_manif: firmware-check POST URL (overrides Kconfig CHECK_URL when non-empty)
+ * - ota_chan:  retained for NVS/UI compatibility (not appended to URL)
  * - ota_force: if true, reflash even when version matches
  * - uplink_did: uplink/device_id; kept in sync with OTA "device_id"
- * - ota_applied: last successfully applied manifest "version" (prevents lab label-bumps
+ * - ota_applied: last successfully applied latestVersion (prevents lab label-bumps
  *                 from causing infinite redownload loops)
  */
 #define NVS_KEY_URL "ota_manif"
@@ -41,11 +42,22 @@ static const char *TAG = "fw_ota_lte";
 #define NVS_KEY_DID "uplink_did"
 #define NVS_KEY_APPLIED "ota_applied"
 
-/* Manifest JSON is small (version/url/sha256/size). Keep this buffer tight. */
-#define MANIFEST_BUF_LEN 1536
+#define CHECK_RESP_BUF_LEN 4096
 
-#ifndef CONFIG_FW_OTA_LTE_DEFAULT_MANIFEST_URL
-#define CONFIG_FW_OTA_LTE_DEFAULT_MANIFEST_URL ""
+#ifndef CONFIG_FW_OTA_LTE_CHECK_URL
+#define CONFIG_FW_OTA_LTE_CHECK_URL ""
+#endif
+#ifndef CONFIG_FW_OTA_LTE_AUTH_HEADER
+#define CONFIG_FW_OTA_LTE_AUTH_HEADER ""
+#endif
+#ifndef CONFIG_FW_OTA_LTE_SYSTEM_USER_ID
+#define CONFIG_FW_OTA_LTE_SYSTEM_USER_ID ""
+#endif
+#ifndef CONFIG_FW_OTA_LTE_MANUFACTURER
+#define CONFIG_FW_OTA_LTE_MANUFACTURER "Espressif Systems"
+#endif
+#ifndef CONFIG_FW_OTA_LTE_DEVICE_TYPE
+#define CONFIG_FW_OTA_LTE_DEVICE_TYPE "fleet monitor"
 #endif
 #ifndef CONFIG_FW_OTA_LTE_AUTO_WAIT_SEC
 #define CONFIG_FW_OTA_LTE_AUTO_WAIT_SEC 90
@@ -76,7 +88,7 @@ static void apply_default_url(fw_ota_lte_config_t *c)
     if (c->manifest_url[0] != '\0') {
         return;
     }
-    const char *def = CONFIG_FW_OTA_LTE_DEFAULT_MANIFEST_URL;
+    const char *def = CONFIG_FW_OTA_LTE_CHECK_URL;
     if (def && def[0]) {
         snprintf(c->manifest_url, sizeof(c->manifest_url), "%s", def);
     }
@@ -237,15 +249,6 @@ static esp_err_t stream_write_cb(const uint8_t *data, size_t len, void *ctx)
     return err;
 }
 
-static void build_manifest_url(const fw_ota_lte_config_t *cfg, char *out, size_t out_len)
-{
-    /* If URL already has '?', append with & else ? */
-    const char *sep = strchr(cfg->manifest_url, '?') ? "&" : "?";
-    snprintf(out, out_len, "%s%sdevice_id=%s&channel=%s", cfg->manifest_url, sep,
-             cfg->device_id[0] ? cfg->device_id : "fleet-demo-001",
-             cfg->channel[0] ? cfg->channel : "stable");
-}
-
 esp_err_t fw_ota_lte_run(void)
 {
     fw_ota_lte_config_t cfg;
@@ -253,137 +256,150 @@ esp_err_t fw_ota_lte_run(void)
     cfg = s_cfg;
     s_st.bytes_downloaded = 0;
     s_st.http_status = 0;
+    s_st.update_available = false;
     s_st.manifest_version[0] = '\0';
+    s_st.current_version[0] = '\0';
     set_phase(FW_OTA_LTE_CHECKING, NULL);
     xSemaphoreGive(s_mu);
 
     if (cfg.manifest_url[0] == '\0') {
         xSemaphoreTake(s_mu, portMAX_DELAY);
-        set_phase(FW_OTA_LTE_FAILED, "manifest_url empty");
+        set_phase(FW_OTA_LTE_FAILED, "check_url empty");
         xSemaphoreGive(s_mu);
         return ESP_ERR_INVALID_STATE;
     }
 
     /*
-     * OTA algorithm (LTE path):
+     * OTA algorithm (LTE / Trafyn path):
      *
-     * 1) Build full manifest request URL by appending the device identity.
-     * 2) GET the manifest JSON over LTE (small response).
-     * 3) Parse required fields: version, url (bin), sha256, size.
-     * 4) Version decision:
-     *      - If force=false and manifest.version == running app version => no_update
-     *      - If force=false and manifest.version == ota_applied (last successful) => no_update
-     *      - Otherwise: start OTA download.
-     * 5) Download bin over LTE using QHTTPGET streaming and write chunks into fw_ota.
-     *    fw_ota_begin() chooses the inactive ota_X slot using esp_ota_get_next_update_partition().
-     * 6) Verify sha256 + size inside fw_ota_end_and_reboot().
-     * 7) Persist ota_applied and reboot (bootloader+otadata selects the new ota_X).
+     * 1) Strip running app version; POST firmware-check JSON to check URL.
+     * 2) Parse Trafyn envelope via fw_ota_parse_check_json.
+     * 3) FAIL / NO_UPDATE → set phase and return.
+     * 4) UPDATE: skip if !force and latestVersion == ota_applied; else
+     *    fw_ota_begin → stream presigned URL → save_applied → reboot.
      */
-    char url[256];
-    build_manifest_url(&cfg, url, sizeof(url));
-    ESP_LOGI(TAG, "fetching manifest: %s", url);
+    char stripped[24];
+    const esp_app_desc_t *app = esp_app_get_description();
+    fw_ota_strip_version(app && app->version[0] ? app->version : "", stripped, sizeof(stripped));
 
-    char *manif = malloc(MANIFEST_BUF_LEN);
-    if (!manif) {
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    snprintf(s_st.current_version, sizeof(s_st.current_version), "%s", stripped);
+    xSemaphoreGive(s_mu);
+
+    cJSON *body = cJSON_CreateObject();
+    if (!body) {
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_FAILED, "no_mem");
+        xSemaphoreGive(s_mu);
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON *input = cJSON_AddObjectToObject(body, "input");
+    if (!input) {
+        cJSON_Delete(body);
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_FAILED, "no_mem");
+        xSemaphoreGive(s_mu);
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddStringToObject(input, "deviceId", cfg.device_id[0] ? cfg.device_id : "fleet-demo-001");
+    cJSON_AddStringToObject(input, "manufacturer", CONFIG_FW_OTA_LTE_MANUFACTURER);
+    cJSON_AddStringToObject(input, "deviceType", CONFIG_FW_OTA_LTE_DEVICE_TYPE);
+    cJSON_AddStringToObject(input, "currentVersion", stripped[0] ? stripped : "0.0.0");
+    char *payload = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (!payload) {
         xSemaphoreTake(s_mu, portMAX_DELAY);
         set_phase(FW_OTA_LTE_FAILED, "no_mem");
         xSemaphoreGive(s_mu);
         return ESP_ERR_NO_MEM;
     }
 
+    net_lte_http_req_headers_t hdr = {
+        .authorization = CONFIG_FW_OTA_LTE_AUTH_HEADER,
+        .system_user_id = CONFIG_FW_OTA_LTE_SYSTEM_USER_ID,
+    };
+
+    char *resp = malloc(CHECK_RESP_BUF_LEN);
+    if (!resp) {
+        free(payload);
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_FAILED, "no_mem");
+        xSemaphoreGive(s_mu);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "firmware-check POST: %s (currentVersion=%s)", cfg.manifest_url,
+             stripped[0] ? stripped : "0.0.0");
+
     net_lte_http_result_t hr;
+    memset(&hr, 0, sizeof(hr));
     size_t got = 0;
-    esp_err_t err = net_lte_http_get(url, manif, MANIFEST_BUF_LEN, &got, &hr);
+    esp_err_t err = net_lte_http_post_recv(cfg.manifest_url, payload, &hdr, resp, CHECK_RESP_BUF_LEN,
+                                          &got, &hr);
+    free(payload);
+
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_st.http_status = hr.http_status;
     xSemaphoreGive(s_mu);
 
     if (err != ESP_OK) {
         xSemaphoreTake(s_mu, portMAX_DELAY);
-        set_phase(FW_OTA_LTE_FAILED, hr.error[0] ? hr.error : "manifest_get_fail");
+        set_phase(FW_OTA_LTE_FAILED, hr.error[0] ? hr.error : "check_post_fail");
         xSemaphoreGive(s_mu);
-        free(manif);
+        free(resp);
         return err;
     }
 
-    cJSON *root = cJSON_Parse(manif);
-    if (!root) {
-        /* Skip leading modem/noise; find first JSON object. */
-        const char *brace = strchr(manif, '{');
-        if (brace) {
-            root = cJSON_Parse(brace);
-        }
-    }
-    if (!root) {
-        char preview[64];
-        snprintf(preview, sizeof(preview), "%s", manif[0] ? manif : "(empty)");
-        for (char *p = preview; *p; ++p) {
-            if (*p < 32 || *p > 126) {
-                *p = '.';
-            }
-        }
-        ESP_LOGE(TAG, "manifest JSON parse fail (len=%u): %s", (unsigned)got, preview);
+    fw_ota_check_result_t parsed;
+    memset(&parsed, 0, sizeof(parsed));
+    if (fw_ota_parse_check_json(resp, stripped, &parsed) != 0) {
+        free(resp);
         xSemaphoreTake(s_mu, portMAX_DELAY);
-        snprintf(s_st.error, sizeof(s_st.error), "manifest_json:%.40s", preview);
-        s_st.phase = FW_OTA_LTE_FAILED;
-        xSemaphoreGive(s_mu);
-        free(manif);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    free(manif);
-
-    const cJSON *jver = cJSON_GetObjectItem(root, "version");
-    const cJSON *jurl = cJSON_GetObjectItem(root, "url");
-    const cJSON *jsha = cJSON_GetObjectItem(root, "sha256");
-    const cJSON *jsize = cJSON_GetObjectItem(root, "size");
-    if (!cJSON_IsString(jver) || !cJSON_IsString(jurl) || !cJSON_IsString(jsha) ||
-        !cJSON_IsNumber(jsize)) {
-        cJSON_Delete(root);
-        xSemaphoreTake(s_mu, portMAX_DELAY);
-        set_phase(FW_OTA_LTE_FAILED, "manifest_fields");
+        set_phase(FW_OTA_LTE_FAILED, "parse_error");
         xSemaphoreGive(s_mu);
         return ESP_ERR_INVALID_RESPONSE;
     }
-
-    const char *version = jver->valuestring;
-    const char *bin_url = jurl->valuestring;
-    const char *sha = jsha->valuestring;
-    size_t size = (size_t)jsize->valuedouble;
+    free(resp);
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    snprintf(s_st.manifest_version, sizeof(s_st.manifest_version), "%s", version);
+    s_st.update_available = parsed.update_available;
+    if (parsed.latest_version[0]) {
+        snprintf(s_st.manifest_version, sizeof(s_st.manifest_version), "%s", parsed.latest_version);
+    }
     xSemaphoreGive(s_mu);
 
-    const esp_app_desc_t *app = esp_app_get_description();
-    const char *running = app ? app->version : "";
-    /* Skip if same as running build OR same as last successfully applied manifest. */
-    if (!cfg.force) {
-        if (running[0] && strcmp(running, version) == 0) {
-            ESP_LOGI(TAG, "already on version %s — no_update", version);
-            cJSON_Delete(root);
-            xSemaphoreTake(s_mu, portMAX_DELAY);
-            set_phase(FW_OTA_LTE_NO_UPDATE, NULL);
-            xSemaphoreGive(s_mu);
-            return ESP_OK;
-        }
-        if (s_applied[0] && strcmp(s_applied, version) == 0) {
-            ESP_LOGI(TAG, "manifest %s already applied — no_update", version);
-            cJSON_Delete(root);
-            xSemaphoreTake(s_mu, portMAX_DELAY);
-            set_phase(FW_OTA_LTE_NO_UPDATE, NULL);
-            xSemaphoreGive(s_mu);
-            return ESP_OK;
-        }
+    if (parsed.kind == FW_OTA_CHECK_FAIL) {
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_FAILED, parsed.error[0] ? parsed.error : "check_fail");
+        xSemaphoreGive(s_mu);
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
-    ESP_LOGI(TAG, "update %s -> %s size=%u", running, version, (unsigned)size);
+    if (parsed.kind == FW_OTA_CHECK_NO_UPDATE) {
+        ESP_LOGI(TAG, "no_update (updateAvailable=%d latest='%s')", (int)parsed.update_available,
+                 parsed.latest_version);
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_NO_UPDATE, NULL);
+        xSemaphoreGive(s_mu);
+        return ESP_OK;
+    }
+
+    /* FW_OTA_CHECK_UPDATE */
+    if (!cfg.force && s_applied[0] && strcmp(s_applied, parsed.latest_version) == 0) {
+        ESP_LOGI(TAG, "latest %s already applied — no_update", parsed.latest_version);
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_NO_UPDATE, NULL);
+        xSemaphoreGive(s_mu);
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "update -> %s size=%u", parsed.latest_version, (unsigned)parsed.size);
     xSemaphoreTake(s_mu, portMAX_DELAY);
     set_phase(FW_OTA_LTE_DOWNLOADING, NULL);
     xSemaphoreGive(s_mu);
 
-    err = fw_ota_begin(size, sha);
+    err = fw_ota_begin(parsed.size, parsed.sha256);
     if (err != ESP_OK) {
-        cJSON_Delete(root);
         fw_ota_status_t ost;
         fw_ota_get_status(&ost);
         xSemaphoreTake(s_mu, portMAX_DELAY);
@@ -393,19 +409,18 @@ esp_err_t fw_ota_lte_run(void)
     }
 
     size_t clen = 0;
+    memset(&hr, 0, sizeof(hr));
     /*
      * Stream the binary and immediately forward each chunk into fw_ota_write().
-     * This avoids buffering the full .bin in RAM.
+     * This avoids buffering the full .bin in RAM. Presigned URL TTL is short.
      */
-    err = net_lte_http_get_stream(bin_url, stream_write_cb, NULL, &clen, &hr);
+    err = net_lte_http_get_stream(parsed.presigned_url, stream_write_cb, NULL, &clen, &hr);
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_st.http_status = hr.http_status;
     xSemaphoreGive(s_mu);
 
-    /* Keep strings from JSON until begin used them — sha/url copied already into fw_ota. */
     char applied_ver[40];
-    snprintf(applied_ver, sizeof(applied_ver), "%s", version);
-    cJSON_Delete(root);
+    snprintf(applied_ver, sizeof(applied_ver), "%s", parsed.latest_version);
 
     if (err != ESP_OK) {
         fw_ota_abort();
@@ -415,7 +430,6 @@ esp_err_t fw_ota_lte_run(void)
         return err;
     }
 
-    /* Remember manifest version so lab label bumps don't re-download forever. */
     (void)save_applied_version(applied_ver);
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
@@ -507,7 +521,7 @@ static void auto_check_once(void)
     ensure_auto_config();
     fw_ota_lte_config_t cfg;
     if (fw_ota_lte_get_config(&cfg) != ESP_OK || cfg.manifest_url[0] == '\0') {
-        ESP_LOGW(TAG, "auto: no manifest URL — skip");
+        ESP_LOGW(TAG, "auto: no check URL — skip");
         return;
     }
     if (fw_ota_lte_is_busy() || fw_ota_is_busy()) {
