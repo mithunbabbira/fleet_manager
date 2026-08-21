@@ -1,6 +1,6 @@
 # LTE GNSS lat/lng on OBD uplink — Design
 
-Device: ESP32-C6 + Quectel EC200U  
+Device: ESP32-C6 + Quectel EC200U (UART1 GPIO16 TX / GPIO17 RX on printed PCB)  
 Date: 2026-08-06  
 Status: approved  
 

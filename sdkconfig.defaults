@@ -23,6 +23,6 @@ CONFIG_NET_LTE_APN="airtelgprs.com"
 CONFIG_FW_OTA_LTE_AUTO_CHECK=y
 CONFIG_FW_OTA_LTE_CHECK_URL="https://api.trafyn.info/workflow-engine/realm/1/user/1/v1/execution/service/runWithNoAuth/get-latest-device-firmware?refreshCache=true"
 CONFIG_FW_OTA_LTE_AUTO_WAIT_SEC=90
-CONFIG_FW_OTA_LTE_AUTO_INTERVAL_H=24
+CONFIG_FW_OTA_LTE_AUTO_INTERVAL_H=4
 CONFIG_ELM_SOFTAP_SSID="Fleet-C6"
 CONFIG_ELM_SOFTAP_PASS="fleetc61"

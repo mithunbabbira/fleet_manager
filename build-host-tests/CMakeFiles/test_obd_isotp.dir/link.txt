@@ -1,0 +1,1 @@
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_obd_isotp.dir/test_obd_isotp.c.o "CMakeFiles/test_obd_isotp.dir/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/components/can_obd/obd_isotp.c.o" -o test_obd_isotp

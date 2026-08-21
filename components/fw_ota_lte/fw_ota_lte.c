@@ -73,6 +73,8 @@ static TaskHandle_t s_task;
 static TaskHandle_t s_auto_task;
 static char s_applied[40];
 
+static esp_err_t save_nvs(const fw_ota_lte_config_t *c);
+
 static void set_phase(fw_ota_lte_phase_t p, const char *err)
 {
     s_st.phase = p;
@@ -92,6 +94,33 @@ static void apply_default_url(fw_ota_lte_config_t *c)
     if (def && def[0]) {
         snprintf(c->manifest_url, sizeof(c->manifest_url), "%s", def);
     }
+}
+
+/* Old lab GET / ngrok saved in NVS ota_manif — must not override Trafyn. */
+static bool check_url_is_legacy_lab(const char *url)
+{
+    if (url == NULL || url[0] == '\0') {
+        return false;
+    }
+    if (strstr(url, "ngrok") != NULL) {
+        return true;
+    }
+    if (strstr(url, "/firmware/manifest") != NULL) {
+        return true;
+    }
+    return false;
+}
+
+static bool sanitize_check_url(fw_ota_lte_config_t *c)
+{
+    if (!check_url_is_legacy_lab(c->manifest_url)) {
+        apply_default_url(c);
+        return false;
+    }
+    ESP_LOGW(TAG, "ignoring legacy lab check URL (ngrok/GET manifest)");
+    c->manifest_url[0] = '\0';
+    apply_default_url(c);
+    return true;
 }
 
 static void defaults(fw_ota_lte_config_t *c)
@@ -127,12 +156,15 @@ static esp_err_t load_nvs(void)
         s_cfg.force = force != 0;
     }
     nvs_close(h);
-    apply_default_url(&s_cfg);
+    bool replaced = sanitize_check_url(&s_cfg);
     if (s_cfg.channel[0] == '\0') {
         snprintf(s_cfg.channel, sizeof(s_cfg.channel), "%s", "stable");
     }
     if (s_cfg.device_id[0] == '\0') {
         snprintf(s_cfg.device_id, sizeof(s_cfg.device_id), "%s", "fleet-demo-001");
+    }
+    if (replaced) {
+        (void)save_nvs(&s_cfg);
     }
     return ESP_OK;
 }
@@ -220,6 +252,7 @@ esp_err_t fw_ota_lte_set_config(const fw_ota_lte_config_t *in)
     if (s_cfg.channel[0] == '\0') {
         snprintf(s_cfg.channel, sizeof(s_cfg.channel), "%s", "stable");
     }
+    (void)sanitize_check_url(&s_cfg);
     esp_err_t err = save_nvs(&s_cfg);
     xSemaphoreGive(s_mu);
     return err;

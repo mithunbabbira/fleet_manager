@@ -1,5 +1,17 @@
 #pragma once
 
+/*
+ * Fleet telemetry uplink over LTE.
+ *
+ * Flow:
+ *   1) Produce task samples OBD + GNSS on an interval (NVS uplink_iv).
+ *   2) Prefer enqueue to microSD (durable queue).
+ *   3) Drain task batch-POSTs queued events to UPLINK_URL (see uplink_payload.h).
+ *   4) If SD is missing, produce does a live single POST to the same URL.
+ *
+ * device_id / enable / interval live in NVS; the POST URL and schemaId do not.
+ */
+
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -36,7 +48,9 @@ typedef struct {
     telemetry_uplink_config_t config;
     telemetry_uplink_last_t last;
     telemetry_uplink_queue_t queue;
+    /** Compile-time UPLINK_URL — SoftAP/serial show this for diagnostics. */
     const char *url;
+    /** Compile-time UPLINK_SCHEMA_ID wrapped around each event payload. */
     const char *schema_id;
 } telemetry_uplink_status_t;
 

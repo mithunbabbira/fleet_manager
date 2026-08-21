@@ -1,0 +1,83 @@
+Start testing: Aug 21 17:59 IST
+----------------------------------------------------------
+1/5 Testing: test_cmd_policy
+1/5 Test: test_cmd_policy
+Command: "/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests/test_cmd_policy"
+Directory: /Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests
+"test_cmd_policy" start time: Aug 21 17:59 IST
+Output:
+----------------------------------------------------------
+test_cmd_policy: PASS
+<end of output>
+Test time =   0.87 sec
+----------------------------------------------------------
+Test Passed.
+"test_cmd_policy" end time: Aug 21 17:59 IST
+"test_cmd_policy" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/5 Testing: test_obd_codec
+2/5 Test: test_obd_codec
+Command: "/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests/test_obd_codec"
+Directory: /Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests
+"test_obd_codec" start time: Aug 21 17:59 IST
+Output:
+----------------------------------------------------------
+test_obd_codec: PASS
+<end of output>
+Test time =   0.46 sec
+----------------------------------------------------------
+Test Passed.
+"test_obd_codec" end time: Aug 21 17:59 IST
+"test_obd_codec" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/5 Testing: test_uplink_payload
+3/5 Test: test_uplink_payload
+Command: "/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests/test_uplink_payload"
+Directory: /Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests
+"test_uplink_payload" start time: Aug 21 17:59 IST
+Output:
+----------------------------------------------------------
+test_uplink_payload: PASS
+<end of output>
+Test time =   0.53 sec
+----------------------------------------------------------
+Test Passed.
+"test_uplink_payload" end time: Aug 21 17:59 IST
+"test_uplink_payload" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/5 Testing: test_obd_isotp
+4/5 Test: test_obd_isotp
+Command: "/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests/test_obd_isotp"
+Directory: /Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests
+"test_obd_isotp" start time: Aug 21 17:59 IST
+Output:
+----------------------------------------------------------
+test_obd_isotp: all tests passed
+<end of output>
+Test time =   0.56 sec
+----------------------------------------------------------
+Test Passed.
+"test_obd_isotp" end time: Aug 21 17:59 IST
+"test_obd_isotp" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/5 Testing: test_fw_ota_lte_parse
+5/5 Test: test_fw_ota_lte_parse
+Command: "/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests/test_fw_ota_lte_parse"
+Directory: /Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/build-host-tests
+"test_fw_ota_lte_parse" start time: Aug 21 17:59 IST
+Output:
+----------------------------------------------------------
+test_fw_ota_lte_parse: ok
+<end of output>
+Test time =   0.48 sec
+----------------------------------------------------------
+Test Passed.
+"test_fw_ota_lte_parse" end time: Aug 21 17:59 IST
+"test_fw_ota_lte_parse" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Aug 21 17:59 IST

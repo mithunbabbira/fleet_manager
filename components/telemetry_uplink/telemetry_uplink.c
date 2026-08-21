@@ -21,13 +21,26 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * LTE telemetry uplink orchestrator.
+ *
+ * Why two paths?
+ * - With SD: produce always enqueues (offline-safe); drain POSTs batches so a
+ *   long outage does not lose samples and a single POST stays under size caps.
+ * - Without SD: produce POSTs one event immediately (lab / no-card fallback).
+ *
+ * HTTP target is UPLINK_URL in uplink_payload.h (Trafyn nc-events-api).
+ * OTA download shares the modem UART — skip POST while fw_ota_lte is busy.
+ */
+
 static const char *TAG = "uplink";
 
+/* NVS namespace "elm" — survives OTA; SoftAP/serial edit these, not the POST URL. */
 #define NVS_NS "elm"
-#define NVS_KEY_EN "uplink_en"
-#define NVS_KEY_IV "uplink_iv"
-#define NVS_KEY_DID "uplink_did"
-#define NVS_KEY_NID "uplink_nid"
+#define NVS_KEY_EN "uplink_en"   /* 0/1 enable */
+#define NVS_KEY_IV "uplink_iv"   /* produce interval seconds */
+#define NVS_KEY_DID "uplink_did" /* Trafyn/deviceId (shared with fw_ota_lte) */
+#define NVS_KEY_NID "uplink_nid" /* node_id in payload */
 
 #define UPLINK_TASK_STACK 8192
 #define UPLINK_DRAIN_STACK 8192
@@ -54,6 +67,10 @@ static TaskHandle_t s_cache_task;
 static TaskHandle_t s_tick_task;
 static TaskHandle_t s_drain_task;
 static bool s_started;
+static bool s_have_gps_last;
+static double s_last_gps_lat;
+static double s_last_gps_lng;
+static uint64_t s_last_gps_ms;
 
 static telemetry_pid_sample_t s_rpm;
 static telemetry_pid_sample_t s_speed;
@@ -65,6 +82,17 @@ static bool s_have_rpm, s_have_speed, s_have_coolant, s_have_throttle, s_have_vo
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static void remember_gps_if_ok(const uplink_snapshot_t *snap)
+{
+    if (!snap->gps_ok) {
+        return;
+    }
+    s_have_gps_last = true;
+    s_last_gps_lat = snap->lat;
+    s_last_gps_lng = snap->lng;
+    s_last_gps_ms = snap->ts_ms;
 }
 
 static void set_last(bool ok, bool skipped, int http_status, const char *reason,
@@ -257,9 +285,6 @@ static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config
     fill_pid_view(&snap->voltage, s_have_voltage, &s_voltage, now);
     xSemaphoreGive(s_mu);
 
-    snprintf(snap->ble_peer_address, sizeof(snap->ble_peer_address), "%s", "-");
-    snprintf(snap->adapter_name, sizeof(snap->adapter_name), "%s", "MCP2515");
-
     obd_profile_t profile;
     memset(&profile, 0, sizeof(profile));
     if (profile_store_get_active(&profile) == ESP_OK) {
@@ -268,14 +293,10 @@ static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config
     can_obd_get_protocol(snap->obd_protocol, sizeof(snap->obd_protocol));
 
     snap->uptime_seconds = (uint32_t)sys_runtime_metric_get("uptime_s");
-    bool can_ready = can_obd_is_ready();
     bool poller = obd_poller_is_enabled();
-    snap->ble_connected = can_ready;
-    snap->elm_ready = can_ready;
     snap->poller_status = poller ? "on" : "paused";
     snap->cmds_ok = sys_runtime_metric_get("cmds_ok");
     snap->cmds_fail = sys_runtime_metric_get("cmds_fail");
-    snap->ble_reconnects = sys_runtime_metric_get("ble_reconnects");
     snap->blocked_cmds = sys_runtime_metric_get("blocked_cmds");
     snap->telemetry_drops = sys_runtime_metric_get("telemetry_drops");
 
@@ -307,16 +328,19 @@ static esp_err_t produce_once(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    bool can_ready = can_obd_is_ready();
-    bool poller = obd_poller_is_enabled();
-    if (!can_ready || !poller) {
-        set_last(false, true, 0, "not ready",
-                 !can_ready ? "can link down" : "poller paused");
+    /* CAN/OBD optional: GPS-only ticks still queue so the truck location is known. */
+    if (!uplink_should_enqueue(have_fresh, snap.gps_ok)) {
+        set_last(false, true, 0, "no pid or gps", "");
         return ESP_ERR_INVALID_STATE;
     }
-    if (!have_fresh) {
-        set_last(false, true, 0, "no fresh sample", "");
-        return ESP_ERR_INVALID_STATE;
+
+    snap.ts_ms = now_ms();
+    if (!have_fresh && snap.gps_ok) {
+        if (!uplink_gps_only_worth_sending(s_have_gps_last, s_last_gps_lat, s_last_gps_lng,
+                                           s_last_gps_ms, snap.lat, snap.lng, snap.ts_ms)) {
+            set_last(false, true, 0, "gps stationary", "");
+            return ESP_ERR_INVALID_STATE;
+        }
     }
 
     static char payload[PAYLOAD_BUF_LEN];
@@ -341,13 +365,17 @@ static esp_err_t produce_once(void)
         }
         set_last(true, false, 0, "queued", "");
         ESP_LOGI(TAG, "enqueued %d bytes", en);
+        remember_gps_if_ok(&snap);
         if (s_drain_task) {
             xTaskNotifyGive(s_drain_task);
         }
         return ESP_OK;
     }
 
-    /* No SD: legacy live single POST. */
+    /*
+     * No SD: live single POST to UPLINK_URL.
+     * Body is one object: {"schemaId":"1087","payload":{...}} (see uplink_payload_build).
+     */
     static char json[EVENT_BUF_LEN + 64];
     int n = uplink_payload_build(&snap, json, sizeof(json));
     if (n < 0) {
@@ -363,6 +391,7 @@ static esp_err_t produce_once(void)
     if (err == ESP_OK) {
         set_last(true, false, http.http_status, "posted", "");
         ESP_LOGI(TAG, "live POST ok status=%d bytes=%d", http.http_status, n);
+        remember_gps_if_ok(&snap);
     } else {
         set_last(false, false, http.http_status, "http fail", http.error);
         ESP_LOGW(TAG, "live POST fail: %s", http.error);
@@ -422,6 +451,11 @@ static esp_err_t drain_once(void)
         return ESP_FAIL;
     }
 
+    /*
+     * Batch POST to the same UPLINK_URL as live path.
+     * Body is a JSON array: [{"schemaId":"1087","payload":{...}}, ...].
+     * On HTTP failure keep SD lines (ack only after success) so samples retry.
+     */
     net_lte_http_result_t http;
     err = net_lte_http_post(UPLINK_URL, batch, &http);
     if (err == ESP_OK) {
@@ -601,6 +635,7 @@ esp_err_t telemetry_uplink_get_status(telemetry_uplink_status_t *out)
     out->last = s_last;
     snprintf(out->queue.drain_error, sizeof(out->queue.drain_error), "%s", s_drain_err);
     xSemaphoreGive(s_mu);
+    /* Expose compile-time POST target for SoftAP / serial `uplink` diagnostics. */
     out->url = UPLINK_URL;
     out->schema_id = UPLINK_SCHEMA_ID;
 

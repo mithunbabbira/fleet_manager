@@ -10,15 +10,12 @@ int main(void)
     memset(&snap, 0, sizeof(snap));
     snprintf(snap.device_id, sizeof(snap.device_id), "%s", "fleet-demo-001");
     snprintf(snap.node_id, sizeof(snap.node_id), "%s", "esp32c6-01");
-    snprintf(snap.ble_peer_address, sizeof(snap.ble_peer_address), "%s", "46:FC:0D:32:1E:66");
-    snprintf(snap.adapter_name, sizeof(snap.adapter_name), "%s", "MODAXE OBDII");
     snprintf(snap.obd_profile, sizeof(snap.obd_profile), "%s", "can_11_500");
     snprintf(snap.obd_protocol, sizeof(snap.obd_protocol), "%s", "unknown");
     snap.uptime_seconds = 29;
-    snap.ble_connected = true;
-    snap.elm_ready = true;
     snap.poller_status = "on";
     snap.cmds_ok = 143;
+    snap.ts_ms = 1710000000123ULL;
 
     /* Missing speed: keys omitted (schema rejects null) + speed_ok false. */
     snap.speed.valid = false;
@@ -40,7 +37,13 @@ int main(void)
     assert(strstr(buf, "\"speed_ok\":false") != NULL);
     assert(strstr(buf, "\"rpm\":779.5") != NULL);
     assert(strstr(buf, "\"rpm_ok\":true") != NULL);
+    assert(strstr(buf, "\"ts_ms\":1710000000123") != NULL);
     assert(strstr(buf, "255") == NULL);
+    assert(strstr(buf, "ble_peer_address") == NULL);
+    assert(strstr(buf, "adapter_name") == NULL);
+    assert(strstr(buf, "ble_connected") == NULL);
+    assert(strstr(buf, "elm_ready") == NULL);
+    assert(strstr(buf, "ble_reconnects") == NULL);
 
     /* Stale speed (ok but old) must also be omitted. */
     snap.speed.valid = true;
@@ -81,10 +84,19 @@ int main(void)
     char batch[4500];
     int bn = uplink_payload_build_batch(blob, 2, batch, sizeof(batch));
     assert(bn > 0);
-    assert(strstr(batch, "\"schemaId\":\"1087\"") != NULL);
-    assert(strstr(batch, "\"events\":[") != NULL);
-    assert(strstr(batch, "12345") != NULL);
-    assert(strstr(batch, "67890") != NULL);
+    assert(batch[0] == '[');
+    assert(batch[bn - 1] == ']');
+    assert(strstr(batch, "\"events\"") == NULL);
+    assert(strstr(batch, "\"queued_at_ms\"") == NULL);
+    assert(strstr(batch, "{\"schemaId\":\"1087\",\"payload\":{") != NULL);
+    /* One schemaId wrapper per queued event. */
+    {
+        int schema_n = 0;
+        for (const char *s = batch; (s = strstr(s, "\"schemaId\":\"1087\"")) != NULL; s += 8) {
+            schema_n++;
+        }
+        assert(schema_n == 2);
+    }
 
     snap.gps_ok = true;
     snap.lat = 12.9716;
@@ -97,12 +109,44 @@ int main(void)
     /* Must be inside payload, not next to schemaId only */
     assert(strstr(buf, "\"payload\":{") != NULL);
 
+    pn = uplink_payload_build_payload(&snap, payload, sizeof(payload));
+    assert(pn > 0);
+    assert(strstr(payload, "\"gps_ok\":true") != NULL);
+    assert(strstr(payload, "\"lat\":") != NULL);
+    assert(strstr(payload, "\"lng\":") != NULL);
+    assert(uplink_payload_build_queued_event(payload, 1ULL, event, sizeof(event)) > 0);
+    bn = uplink_payload_build_batch(event, 1, batch, sizeof(batch));
+    assert(bn > 0);
+    assert(batch[0] == '[');
+    assert(strstr(batch, "\"gps_ok\":true") != NULL);
+    assert(strstr(batch, "\"lat\":") != NULL);
+    assert(strstr(batch, "\"lng\":") != NULL);
+    assert(strstr(batch, "\"source\":\"esp32_obd\"") != NULL);
+
     snap.gps_ok = false;
     n = uplink_payload_build(&snap, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"gps_ok\":false") != NULL);
     assert(strstr(buf, "\"lat\":") == NULL);
     assert(strstr(buf, "\"lng\":") == NULL);
+
+    assert(uplink_should_enqueue(true, false) == true);
+    assert(uplink_should_enqueue(false, true) == true);
+    assert(uplink_should_enqueue(true, true) == true);
+    assert(uplink_should_enqueue(false, false) == false);
+
+    {
+        double d = uplink_gps_distance_m(12.9716, 77.5946, 12.9721, 77.5946);
+        assert(d > 50.0);
+        assert(d < 80.0);
+        assert(uplink_gps_only_worth_sending(false, 0, 0, 0, 12.9716, 77.5946, 1000) == true);
+        assert(uplink_gps_only_worth_sending(true, 12.9716, 77.5946, 1000, 12.9716, 77.5946,
+                                             2000) == false);
+        assert(uplink_gps_only_worth_sending(true, 12.9716, 77.5946, 1000, 12.9716, 77.5946,
+                                             1000 + UPLINK_GPS_ONLY_HEARTBEAT_MS) == true);
+        assert(uplink_gps_only_worth_sending(true, 12.9716, 77.5946, 1000, 12.9721, 77.5946,
+                                             2000) == true);
+    }
 
     printf("test_uplink_payload: PASS\n");
     return 0;

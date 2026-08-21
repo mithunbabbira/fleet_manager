@@ -1,18 +1,17 @@
 # SD SPI smoke test (ESP32-C6)
 
-Validates the soldered microSD module on the shared SPI bus with MCP2515.
+Validates the **printed carrier** microSD path: dedicated SPI2, not shared
+with MCP2515.
 
-## Wiring assumed
+## Wiring (production PCB)
 
 | Signal | GPIO |
 |--------|------|
-| SCK | 21 |
-| MOSI | 22 |
-| MISO | 23 |
+| SCK | 4 |
+| MOSI | 5 |
+| MISO | 6 |
 | SD CS | 18 |
 | MCP2515 CS | 20 (held HIGH during this test) |
-
-Change `PIN_SD_CS` in `main/app_main.c` if your CS is different.
 
 ## Run
 
@@ -26,3 +25,5 @@ idf.py -p /dev/cu.usbmodemXXXX build flash monitor
 Look for `SD SMOKE: PASS`.
 
 If the card is not FAT32, the test retries once with `format_if_mount_failed` (erases the card).
+
+Restore the main fleet app from the repo root with `idf.py -p PORT flash`.

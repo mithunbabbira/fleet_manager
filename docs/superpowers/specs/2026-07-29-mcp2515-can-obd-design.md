@@ -25,7 +25,7 @@ ESP32-C6 Super Mini ↔ TXS0108E (3.3 V/5 V) ↔ MCP2515+TJA1050 (8 MHz xtal)
 | CS     | 20 |
 | INT    | 14 |
 
-EC200U LTE stays on UART1 GPIO17/16. OBD: CAN_H pin 6, CAN_L pin 14, GND pin 4/5.
+EC200U LTE is UART1 on the printed PCB: **GPIO16 ESP-TX → modem RX**, **GPIO17 ESP-RX ← modem TX** (firmware defaults match this copper). OBD: CAN_H pin 6, CAN_L pin 14, GND pin 4/5. See `hardware/fleet_telematics_carrier/README.md`.
 
 ## Architecture
 

@@ -1,87 +1,111 @@
-# Fleet Telematics Carrier PCB
+# Fleet telematics carrier (printed PCB)
 
-This directory contains a draft Gerber package for a module-carrier PCB based on
-the hardware documented in this repository.
+This is the **authoritative hardware map** for the fabricated board. Firmware
+defaults match this copper. Do not respin the PCB for LTE RX/TX — UART pins
+were aligned in software on 2026-08-18.
 
-## Scope
+Fabricated gerbers (KiCad 9.0.9, 2026-08-12): repo root
+`Vehical_Telematics_Design.zip`. Close-up photos of the assembled carrier are
+in `wiring_diagrams/`.
 
-The design is a carrier/interconnect board for these already-used modules:
+A Python Gerber generator used to live here. It was a **pre-fab draft** and
+does **not** match the printed LTE UART nets. It has been removed.
 
-- ESP32-C6 Super Mini, wired through a labeled 2.54 mm header
-- TXS0108E 8-channel bidirectional level converter between ESP32-C6 and MCP2515
-- MCP2515 + TJA1050 CAN module
-- Quectel EC200U LTE module or breakout
-- XY-3606 buck converter module
-- OBD cable/terminal input and separate LTE power input
+## Modules on the board
 
-It is not a bare-chip EC200U or bare MCP2515 layout. The repo does not contain
-manufacturer footprints, complete module dimensions, surge/ESD protection, or a
-reviewed production schematic, so the generated files should be treated as a
-reviewable fabrication draft, not a release-to-manufacturing package.
+| Module | Role |
+|---|---|
+| ESP32-C6 Super Mini | MCU, USB Serial/JTAG console |
+| TXS0108E | 3.3 V (A) ↔ 5 V (B) for MCP2515 SPI + INT |
+| MCP2515 + TJA1050 | Vehicle CAN |
+| microSD reader | Durable uplink queue |
+| Quectel EC200U | LTE UART + GNSS |
+| Separate LTE VBAT | Modem supply, common GND with ESP |
 
-## Validated Firmware Nets
+## Validated firmware nets (2026-08-18)
 
-| Function | ESP32-C6 GPIO |
-|---|---:|
-| MCP2515 SCK (soft-SPI) | GPIO21 |
-| MCP2515 MOSI | GPIO22 |
-| MCP2515 MISO | GPIO23 |
-| MCP2515 CS | GPIO20 |
-| MCP2515 INT | GPIO14 |
-| microSD SCK (hardware SPI2) | GPIO4 |
-| microSD MOSI | GPIO5 |
-| microSD MISO | GPIO6 |
-| microSD CS | GPIO18 |
-| EC200U RXD, ESP -> modem | GPIO17 |
-| EC200U TXD, ESP <- modem | GPIO16 |
+MCP, SD, SoftAP, and LTE AT were proven on this copper. LTE UART uses the
+**printed** mapping (same as the old jumper that already worked), not a
+textbook TX↔RX cross.
 
-The TXS0108E A side is tied to ESP32-C6 3V3 logic, and the B side is tied to the
-MCP2515 module's 5V logic. `OE` is tied to 3V3.
+### ESP32-C6 GPIO
 
-### SPI layout (separate wires)
+| Function | GPIO | Notes |
+|---|---:|---|
+| MCP2515 SCK | 21 | Soft-SPI (bit-bang) |
+| MCP2515 MOSI (SI) | 22 | Soft-SPI |
+| MCP2515 MISO (SO) | 23 | Soft-SPI |
+| MCP2515 CS | 20 | Idle high at boot |
+| MCP2515 INT | 14 | Reserved; driver still polls |
+| microSD SCK | 4 | Hardware SPI2 |
+| microSD MOSI | 5 | Hardware SPI2 |
+| microSD MISO | 6 | Hardware SPI2 |
+| microSD CS | 18 | Idle high at boot |
+| EC200U UART — ESP TX | **16** | ESP **GPIO16 → modem RX** |
+| EC200U UART — ESP RX | **17** | ESP **GPIO17 ← modem TX** |
 
-ESP32-C6 has **one** general-purpose SPI controller (SPI2). Production wiring uses
-**separate pins** for CAN and SD:
+UART1, 115200 8N1. Kconfig: `CONFIG_NET_LTE_UART_TX_GPIO=16`,
+`CONFIG_NET_LTE_UART_RX_GPIO=17`.
 
-| Device | How | Pins |
-|---|---|---|
-| microSD | Hardware SPI2 | SCK4 MOSI5 MISO6 CS18 |
-| MCP2515 | Soft-SPI (GPIO) | SCK21 MOSI22 MISO23 CS20 |
+KiCad net names on the printed board are `/GMS_TX` and `/GMS_RX` for the modem
+UART, and `/A1`–`/A5` / `/B1`–`/B5` for the TXS channels.
 
-No shared SCK/MOSI/MISO. Optional: 10 kΩ pull-ups to 3.3 V on both CS lines.
+### TXS0108E ↔ MCP2515 (working orientation)
 
-## Generated Outputs
+A-side = ESP 3.3 V, B-side = MCP 5 V, `OE` = 3.3 V.
 
-Run:
+| MCP2515 | TXS B | TXS A | ESP GPIO |
+|---|---|---|---:|
+| CS | B1 | A1 | 20 |
+| SO (MISO) | B2 | A2 | 23 |
+| SI (MOSI) | B3 | A3 | 22 |
+| SCK | B4 | A4 | 21 |
+| INT | B5 | A5 | 14 |
 
-```bash
-python3 hardware/fleet_telematics_carrier/generate_gerbers.py
-```
+TXS breakout silkscreen can read A8→A1 left-to-right. Match **net names**
+`/A1`…`/A5`, not assumed left-to-right pin order.
 
-The script writes:
+### LTE UART (printed copper)
 
-- `gerbers/fleet_telematics_carrier-F_Cu.gbr`
-- `gerbers/fleet_telematics_carrier-B_Cu.gbr`
-- `gerbers/fleet_telematics_carrier-F_Mask.gbr`
-- `gerbers/fleet_telematics_carrier-B_Mask.gbr`
-- `gerbers/fleet_telematics_carrier-F_SilkS.gbr`
-- `gerbers/fleet_telematics_carrier-Edge_Cuts.gbr`
-- `gerbers/fleet_telematics_carrier-PTH.drl`
-- `gerbers/fleet_telematics_carrier-NPTH.drl`
-- `gerbers/bom.csv`
-- `gerbers/netlist.csv`
-- `fleet_telematics_carrier_gerbers.zip`
+| ESP pin | Modem pin (module silk TX/RX) |
+|---|---|
+| GPIO16 | RX (modem receive) |
+| GPIO17 | TX (modem transmit) |
+| GND | GND |
 
-## Pre-Fab Checks
+This looks “same-name inverted” versus a textbook UART cross. It is what the
+printed board and the old working jumper both use. Firmware follows the copper.
 
-Before ordering boards, verify:
+Do **not** flash an older image that still sets TX=GPIO17 / RX=GPIO16.
 
-- Exact pin order of the ESP32-C6 Super Mini board you will solder or wire.
-- Exact pin order of the TXS0108E breakout and MCP2515+TJA1050 module.
-- Whether your MCP2515 module already has CAN termination installed.
-- Whether the selected XY-3606 setting and copper width are suitable for the
-  real load.
-- EC200U peak-current power path, PWRKEY timing, antenna/SIM clearances, and
-  common-ground strategy.
-- Vehicle transient, reverse-polarity, fuse, ESD, and enclosure clearances.
+Modem needs its own VBAT (~3.7–4.2 V, peak current several hundred mA to ~2 A),
+PWRKEY to boot, and **NETLIGHT** activity. Unplug the EC200U USB cable while
+the ESP owns the UART (many breakouts share one UART with USB-serial).
 
+## What is used vs not used
+
+**Used (production firmware + this PCB):**
+
+- MCP2515 **soft-SPI** on 21/22/23/20/14 through TXS0108E
+- microSD **dedicated SPI2** on 4/5/6/18 (not shared with MCP)
+- EC200U on UART1 **GPIO16 TX / GPIO17 RX**
+- USB Serial/JTAG console; SoftAP `Fleet-C6` / `fleetc61` → `http://192.168.4.1/`
+- Dual-bank OTA (`ota_0` + `ota_1`)
+
+**Not used (do not wire or revive):**
+
+- Shared SPI between MCP and SD (old smoke-test idea)
+- Textbook LTE map ESP GPIO17=TX / GPIO16=RX
+- BLE ELM327 adapter path (deleted from firmware)
+- Python `generate_gerbers.py` draft carrier (removed; not the fabricated board)
+
+## Lab proof (2026-08-18)
+
+On the printed carrier with the UART firmware invert:
+
+- `mcp2515: detected (CANSTAT=0x80)`
+- `store_sd` mounted (SD32G)
+- `lte: uart_ok=yes sim=yes reg=yes attached=yes csq=18(-77dBm) op="IND airtel"`
+- HTTP left the modem (server returned 400 — API issue, not UART)
+
+CAN `TX not acked` is expected with no vehicle on the bus.

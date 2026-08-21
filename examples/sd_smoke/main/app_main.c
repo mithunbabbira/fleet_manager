@@ -1,14 +1,14 @@
 /*
  * SD card SPI smoke test for ESP32-C6 fleet board.
  *
- * Wiring (shared SPI bus with MCP2515, separate CS):
- *   SCK  GPIO21  (same as MCP2515)
- *   MOSI GPIO22  (same as MCP2515)
- *   MISO GPIO23  (same as MCP2515)
- *   CS   GPIO18  (SD only — change PIN_SD_CS if you used another GPIO)
+ * Wiring (printed carrier — dedicated SPI2, not shared with MCP):
+ *   SCK  GPIO4
+ *   MOSI GPIO5
+ *   MISO GPIO6
+ *   CS   GPIO18
  *   VCC  5V or 3.3V per module; GND common
  *
- * MCP2515 CS (GPIO20) is held HIGH so the CAN chip stays quiet on MISO.
+ * MCP2515 CS (GPIO20) is held HIGH so the CAN chip stays quiet.
  *
  * Expect: mount OK, write/read /sdcard/smoke.txt, then PASS.
  */
@@ -29,9 +29,9 @@
 
 static const char *TAG = "sd_smoke";
 
-#define PIN_SCK   21
-#define PIN_MOSI  22
-#define PIN_MISO  23
+#define PIN_SCK   4
+#define PIN_MOSI  5
+#define PIN_MISO  6
 #define PIN_SD_CS 18
 #define PIN_MCP_CS 20 /* hold high so MCP2515 does not drive MISO */
 

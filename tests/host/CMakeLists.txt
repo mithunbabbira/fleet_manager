@@ -26,6 +26,7 @@ add_executable(test_uplink_payload
 target_include_directories(test_uplink_payload PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
 )
+target_link_libraries(test_uplink_payload m)
 
 add_executable(test_obd_isotp
     test_obd_isotp.c

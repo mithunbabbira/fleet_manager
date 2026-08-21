@@ -1,0 +1,1 @@
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_uplink_payload.dir/test_uplink_payload.c.o "CMakeFiles/test_uplink_payload.dir/Users/nc23896-mithun/Documents/office/nc_rnd/fleet/ELM327_esp/components/telemetry_uplink/uplink_payload.c.o" -o test_uplink_payload  -lm

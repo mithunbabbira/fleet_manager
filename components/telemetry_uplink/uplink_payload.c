@@ -1,8 +1,20 @@
 #include "uplink_payload.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+/*
+ * Builds Trafyn event JSON. Host-testable (no ESP-IDF).
+ *
+ * Live POST body (one event):
+ *   {"schemaId":"1087","payload":{...}}
+ * Batch POST body (drain):
+ *   [{"schemaId":"1087","payload":{...}}, ...]
+ * SD queue line (not sent as-is):
+ *   {"payload":{...},"queued_at_ms":N}  — schemaId added only when building the batch.
+ */
 
 bool uplink_pid_is_fresh_ok(const uplink_pid_view_t *p)
 {
@@ -10,6 +22,45 @@ bool uplink_pid_is_fresh_ok(const uplink_pid_view_t *p)
         return false;
     }
     return p->valid && p->ok && p->age_ms <= UPLINK_PID_FRESH_MS;
+}
+
+bool uplink_should_enqueue(bool have_fresh_pid, bool gps_ok)
+{
+    return have_fresh_pid || gps_ok;
+}
+
+double uplink_gps_distance_m(double lat1, double lng1, double lat2, double lng2)
+{
+    const double r_m = 6371000.0;
+    const double deg = 3.14159265358979323846 / 180.0;
+    double p1 = lat1 * deg;
+    double p2 = lat2 * deg;
+    double dp = (lat2 - lat1) * deg;
+    double dl = (lng2 - lng1) * deg;
+    double a = sin(dp / 2.0) * sin(dp / 2.0) +
+               cos(p1) * cos(p2) * sin(dl / 2.0) * sin(dl / 2.0);
+    if (a < 0.0) {
+        a = 0.0;
+    }
+    if (a > 1.0) {
+        a = 1.0;
+    }
+    return 2.0 * r_m * atan2(sqrt(a), sqrt(1.0 - a));
+}
+
+bool uplink_gps_only_worth_sending(bool have_last, double last_lat, double last_lng,
+                                   uint64_t last_ms, double lat, double lng, uint64_t now_ms)
+{
+    if (!have_last) {
+        return true;
+    }
+    if (uplink_gps_distance_m(last_lat, last_lng, lat, lng) >= UPLINK_GPS_ONLY_MIN_MOVE_M) {
+        return true;
+    }
+    if (now_ms >= last_ms && (now_ms - last_ms) >= UPLINK_GPS_ONLY_HEARTBEAT_MS) {
+        return true;
+    }
+    return false;
 }
 
 static int append(char *out, size_t out_len, size_t *off, const char *chunk)
@@ -123,12 +174,8 @@ int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_
     if (appendf(out, out_len, &off, ",\"schema_version\":1") != 0) {
         return -1;
     }
-    if (append(out, out_len, &off, ",\"ble_peer_address\":") != 0 ||
-        append_json_str(out, out_len, &off, snap->ble_peer_address) != 0) {
-        return -1;
-    }
-    if (append(out, out_len, &off, ",\"adapter_name\":") != 0 ||
-        append_json_str(out, out_len, &off, snap->adapter_name) != 0) {
+    if (appendf(out, out_len, &off, ",\"ts_ms\":%llu",
+                (unsigned long long)snap->ts_ms) != 0) {
         return -1;
     }
     if (append(out, out_len, &off, ",\"obd_profile\":") != 0 ||
@@ -139,11 +186,8 @@ int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_
         append_json_str(out, out_len, &off, snap->obd_protocol) != 0) {
         return -1;
     }
-    if (appendf(out, out_len, &off,
-                ",\"uptime_seconds\":%u,\"ble_connected\":%s,\"elm_ready\":%s,\"poller_status\":",
-                (unsigned)snap->uptime_seconds,
-                snap->ble_connected ? "true" : "false",
-                snap->elm_ready ? "true" : "false") != 0) {
+    if (appendf(out, out_len, &off, ",\"uptime_seconds\":%u,\"poller_status\":",
+                (unsigned)snap->uptime_seconds) != 0) {
         return -1;
     }
     if (append_json_str(out, out_len, &off,
@@ -151,11 +195,10 @@ int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_
         return -1;
     }
     if (appendf(out, out_len, &off,
-                ",\"cmds_ok\":%llu,\"cmds_fail\":%llu,\"ble_reconnects\":%llu,"
+                ",\"cmds_ok\":%llu,\"cmds_fail\":%llu,"
                 "\"blocked_cmds\":%llu,\"telemetry_drops\":%llu",
                 (unsigned long long)snap->cmds_ok,
                 (unsigned long long)snap->cmds_fail,
-                (unsigned long long)snap->ble_reconnects,
                 (unsigned long long)snap->blocked_cmds,
                 (unsigned long long)snap->telemetry_drops) != 0) {
         return -1;
@@ -201,6 +244,7 @@ int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_
 
 int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_len)
 {
+    /* Live / no-SD path: wrap payload with schemaId for a single-object POST body. */
     if (!snap || !out || out_len < 32) {
         return -1;
     }
@@ -250,25 +294,84 @@ int uplink_payload_build_queued_event(const char *payload_json, uint64_t queued_
     return (int)off;
 }
 
+/* Extract the JSON object that follows "payload": in a queued event line. */
+static int extract_payload_object(const char *line, size_t line_len, const char **obj,
+                                  size_t *obj_len)
+{
+    if (!line || !obj || !obj_len || line_len < 12) {
+        return -1;
+    }
+    const char *key = "\"payload\":";
+    size_t key_len = 10;
+    const char *end = line + line_len;
+    const char *found = NULL;
+    for (const char *s = line; s + key_len <= end; s++) {
+        if (memcmp(s, key, key_len) == 0) {
+            found = s + key_len;
+            break;
+        }
+    }
+    if (!found) {
+        return -1;
+    }
+    while (found < end && (*found == ' ' || *found == '\t')) {
+        found++;
+    }
+    if (found >= end || *found != '{') {
+        return -1;
+    }
+    int depth = 0;
+    bool in_str = false;
+    bool esc = false;
+    const char *q = found;
+    for (; q < end; q++) {
+        char c = *q;
+        if (in_str) {
+            if (esc) {
+                esc = false;
+            } else if (c == '\\') {
+                esc = true;
+            } else if (c == '"') {
+                in_str = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            continue;
+        }
+        if (c == '{') {
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+                *obj = found;
+                *obj_len = (size_t)(q - found + 1);
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
 int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *out,
                                size_t out_len)
 {
+    /*
+     * Drain path: turn SD NDJSON lines into the Trafyn array POST body.
+     * Each line's payload object is re-wrapped with UPLINK_SCHEMA_ID; queued_at_ms
+     * is intentionally omitted from the HTTP body (local queue metadata only).
+     */
     if (!events_blob || !out || out_len < 32 || n_events == 0) {
         return -1;
     }
     size_t off = 0;
     out[0] = '\0';
-    if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
-        return -1;
-    }
-    if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
-        return -1;
-    }
-    if (append(out, out_len, &off, "\",\"events\":[") != 0) {
+    if (append(out, out_len, &off, "[") != 0) {
         return -1;
     }
 
-    /* events_blob is newline-separated JSON objects. */
+    /* events_blob is newline-separated queued objects. */
     const char *p = events_blob;
     size_t emitted = 0;
     while (*p && emitted < n_events) {
@@ -286,23 +389,40 @@ int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *o
         if (len == 0) {
             continue;
         }
+        const char *payload_obj = NULL;
+        size_t payload_len = 0;
+        if (extract_payload_object(start, len, &payload_obj, &payload_len) != 0) {
+            return -1;
+        }
         if (emitted > 0) {
             if (append(out, out_len, &off, ",") != 0) {
                 return -1;
             }
         }
-        if (off + len + 1 > out_len) {
+        if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
             return -1;
         }
-        memcpy(out + off, start, len);
-        off += len;
+        if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
+            return -1;
+        }
+        if (append(out, out_len, &off, "\",\"payload\":") != 0) {
+            return -1;
+        }
+        if (off + payload_len + 2 > out_len) {
+            return -1;
+        }
+        memcpy(out + off, payload_obj, payload_len);
+        off += payload_len;
         out[off] = '\0';
+        if (append(out, out_len, &off, "}") != 0) {
+            return -1;
+        }
         emitted++;
     }
     if (emitted == 0) {
         return -1;
     }
-    if (append(out, out_len, &off, "]}") != 0) {
+    if (append(out, out_len, &off, "]") != 0) {
         return -1;
     }
     return (int)off;

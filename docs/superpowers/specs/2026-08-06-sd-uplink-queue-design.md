@@ -1,6 +1,6 @@
 # SD-backed uplink queue (batch drain) — Design
 
-Device: ESP32-C6 + MCP2515 (SPI2) + microSD (SPI CS GPIO18) + EC200U LTE  
+Device: ESP32-C6 + MCP2515 (soft-SPI 21/22/23/20) + microSD (SPI2 4/5/6 CS18) + EC200U LTE (UART GPIO16 TX / GPIO17 RX)  
 Date: 2026-08-06
 
 ## Goal
