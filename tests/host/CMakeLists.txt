@@ -52,3 +52,45 @@ add_test(NAME test_obd_codec COMMAND test_obd_codec)
 add_test(NAME test_uplink_payload COMMAND test_uplink_payload)
 add_test(NAME test_obd_isotp COMMAND test_obd_isotp)
 add_test(NAME test_fw_ota_lte_parse COMMAND test_fw_ota_lte_parse)
+
+add_executable(test_fleet_tlv
+    test_fleet_tlv.c
+    ${CMAKE_SOURCE_DIR}/../../components/fleet_protocol/fleet_tlv.c
+)
+target_include_directories(test_fleet_tlv PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../components/fleet_protocol/include
+)
+
+add_executable(test_host_registry
+    test_host_registry.c
+    ${CMAKE_SOURCE_DIR}/../../components/fleet_protocol/fleet_tlv.c
+    ${CMAKE_SOURCE_DIR}/../../components/host_registry/host_registry.c
+    ${CMAKE_SOURCE_DIR}/../../components/host_registry/fleet_manifest_catalog.c
+)
+target_include_directories(test_host_registry PRIVATE
+    ${CMAKE_SOURCE_DIR}/shims
+    ${CMAKE_SOURCE_DIR}/../../components/fleet_protocol/include
+    ${CMAKE_SOURCE_DIR}/../../components/host_registry/include
+)
+target_compile_definitions(test_host_registry PRIVATE HOST_REGISTRY_HOST_TEST=1)
+
+add_test(NAME test_fleet_tlv COMMAND test_fleet_tlv)
+add_test(NAME test_host_registry COMMAND test_host_registry)
+
+add_executable(test_fleet_uplink_path
+    test_fleet_uplink_path.c
+    ${CMAKE_SOURCE_DIR}/../../components/fleet_protocol/fleet_tlv.c
+    ${CMAKE_SOURCE_DIR}/../../components/host_registry/host_registry.c
+    ${CMAKE_SOURCE_DIR}/../../components/host_registry/fleet_manifest_catalog.c
+    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
+)
+target_include_directories(test_fleet_uplink_path PRIVATE
+    ${CMAKE_SOURCE_DIR}/shims
+    ${CMAKE_SOURCE_DIR}/../../components/fleet_protocol/include
+    ${CMAKE_SOURCE_DIR}/../../components/host_registry/include
+    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
+)
+target_compile_definitions(test_fleet_uplink_path PRIVATE HOST_REGISTRY_HOST_TEST=1)
+target_link_libraries(test_fleet_uplink_path m)
+
+add_test(NAME test_fleet_uplink_path COMMAND test_fleet_uplink_path)

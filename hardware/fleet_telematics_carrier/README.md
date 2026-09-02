@@ -21,6 +21,13 @@ does **not** match the printed LTE UART nets. It has been removed.
 | microSD reader | Durable uplink queue |
 | Quectel EC200U | LTE UART + GNSS |
 | Separate LTE VBAT | Modem supply, common GND with ESP |
+| Optional ESP32-C6 host | Zigbee end device (e.g. UL212 BLE fetch) — not on carrier PCB |
+
+## Optional Zigbee sensor host
+
+A second ESP32-C6 can sit beside the carrier and join the coordinator over Zigbee
+(open network, channel 15). Reference firmware:
+`host/ul212-ble-fetch/`. Docs: `docs/fleet-zigbee-host-guide.md`.
 
 ## Validated firmware nets (2026-08-18)
 

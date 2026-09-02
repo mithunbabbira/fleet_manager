@@ -1,5 +1,9 @@
 #include "transport_http.h"
 
+#include "sdkconfig.h"
+
+#if CONFIG_ELM_HTTP_ENABLE
+
 #include "http_api.h"
 
 #include "esp_event.h"
@@ -9,7 +13,6 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
-#include "sdkconfig.h"
 
 #include <string.h>
 
@@ -36,8 +39,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
-/* ESP_ERR_INVALID_STATE from either initializer means another subsystem
- * already completed the shared network/event-loop setup. */
 static esp_err_t init_netif_and_event_loop(void)
 {
     esp_err_t err = esp_netif_init();
@@ -123,10 +124,7 @@ static esp_err_t start_httpd(void)
     config.server_port = 80;
     config.max_uri_handlers = HTTP_MAX_URI_HANDLERS;
     config.lru_purge_enable = true;
-    /* Default 4KB stack overflows on /api/status + cJSON (phone SoftAP crash). */
     config.stack_size = 12288;
-    /* Some raw OBD probes (e.g. protocol search on link loss) can take a while. */
-    /* SoftAP OTA uploads ~1 MiB; allow a long recv window. */
     config.recv_wait_timeout = 180;
     config.send_wait_timeout = 45;
 
@@ -167,3 +165,17 @@ esp_err_t transport_http_start(void)
     s_started = true;
     return ESP_OK;
 }
+
+#else /* !CONFIG_ELM_HTTP_ENABLE */
+
+#include "esp_log.h"
+
+static const char *TAG = "transport_http";
+
+esp_err_t transport_http_start(void)
+{
+    ESP_LOGI(TAG, "HTTP/SoftAP disabled — use USB serial + PC Carrier Console");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+#endif /* CONFIG_ELM_HTTP_ENABLE */

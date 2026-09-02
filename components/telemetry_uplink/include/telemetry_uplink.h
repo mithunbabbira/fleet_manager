@@ -9,7 +9,8 @@
  *   3) Drain task batch-POSTs queued events to UPLINK_URL (see uplink_payload.h).
  *   4) If SD is missing, produce does a live single POST to the same URL.
  *
- * device_id / enable / interval live in NVS; the POST URL and schemaId do not.
+ * device_id / node_id / enable / interval / POST URL / schema live in NVS.
+ * Factory defaults for URL/schema are in uplink_payload.h when NVS is empty.
  */
 
 #include "esp_err.h"
@@ -48,22 +49,44 @@ typedef struct {
     telemetry_uplink_config_t config;
     telemetry_uplink_last_t last;
     telemetry_uplink_queue_t queue;
-    /** Compile-time UPLINK_URL — SoftAP/serial show this for diagnostics. */
+    /** Effective POST URL (NVS override or compile-time default). */
     const char *url;
-    /** Compile-time UPLINK_SCHEMA_ID wrapped around each event payload. */
+    /** Effective schema id (NVS override or compile-time default). */
     const char *schema_id;
 } telemetry_uplink_status_t;
 
+/** @brief True when device_id and node_id are set in NVS (required before uplink/OTA). */
+bool telemetry_uplink_is_provisioned(void);
+
+/**
+ * @brief Set device_id + node_id together; persists NVS and syncs OTA device_id.
+ * @note Does not enable uplink — call separately after provisioning.
+ */
+esp_err_t telemetry_uplink_provision(const char *device_id, const char *node_id);
+
+/** @brief Persist telemetry POST URL (NVS uplink_url). */
+esp_err_t telemetry_uplink_set_post_url(const char *url);
+
+/** @brief Persist schema id (NVS uplink_schema). */
+esp_err_t telemetry_uplink_set_schema_id(const char *schema_id);
+
+/**
+ * @brief Start cache + tick (+ drain if SD mounted at boot). Idempotent.
+ * @note Drain task is not created if SD mounts later.
+ */
 esp_err_t telemetry_uplink_start(void);
 
 esp_err_t telemetry_uplink_get_config(telemetry_uplink_config_t *out);
+/**
+ * @brief Validate, save NVS elm/uplink_*, update RAM (shares uplink_did with OTA).
+ */
 esp_err_t telemetry_uplink_set_config(const telemetry_uplink_config_t *in);
 esp_err_t telemetry_uplink_get_status(telemetry_uplink_status_t *out);
 
-/** Force one produce+enqueue (and kick drain). Same gating as the interval task. */
+/** @brief One produce; notify drain and best-effort drain_once if applicable. */
 esp_err_t telemetry_uplink_send_now(void);
 
-/** Lab helper: enqueue a minimal dummy event (no CAN gate) and kick drain. */
+/** @brief Lab: enqueue minimal event and kick drain (bypasses PID/GPS gates). */
 esp_err_t telemetry_uplink_queue_test_enqueue(void);
 
 #ifdef __cplusplus

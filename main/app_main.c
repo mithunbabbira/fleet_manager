@@ -11,8 +11,10 @@
 #include "store_sd.h"
 #include "sys_runtime.h"
 #include "telemetry_bus.h"
+#include "sdkconfig.h"
 #include "transport_http.h"
 #include "transport_serial.h"
+#include "transport_zigbee.h"
 #include "telemetry_uplink.h"
 
 #include <stdio.h>
@@ -25,14 +27,9 @@ static const char *TAG = "app";
 #define BONDED_BOOT_WAIT_MS    15000
 #define BONDED_BOOT_POLL_MS    200
 
-/*
- * CAN link supervisor.
- *
- * can_obd auto-detects ISO-TP / OBD-II protocol on the MCP2515. Once an ECU
- * answers, enable the profile poller. On link loss, pause polling so can_obd
- * can re-probe without competing traffic.
- *
- * (Name "bonded_boot" is historical from the BLE era; this task is CAN-only now.)
+/**
+ * @brief CAN link supervisor: enable obd_poller when ECU answers; pause on link loss.
+ * @note Historical task name "bonded_boot"; BLE path removed. Polls can_obd_is_ready.
  */
 static void can_boot_task(void *arg)
 {
@@ -55,19 +52,21 @@ static void can_boot_task(void *arg)
     }
 }
 
-/*
- * Fleet telematics node entry (runs from whichever OTA slot otadata selected:
- * ota_0 or ota_1). Boot order matters:
+/**
+ * @brief Fleet telematics entry from the active OTA slot (ota_0 or ota_1).
+ * @note Boot order: NVS → fw_ota* → profiles/bus → LTE+auto OTA → SPI/CAN → SD →
+ *       uplink → serial/SoftAP → OTA confirm → poller → can_boot. Soft failures
+ *       (LTE/SD/SoftAP) continue; NVS/sys_runtime/serial/poller are hard-checked.
  *
  *  1) NVS          — settings survive OTA (Trafyn host, uplink, profiles, …)
  *  2) fw_ota*      — dual-bank flash writer + LTE OTA client (loads ota_manif)
  *  3) profiles/bus — OBD poll config + in-process telemetry pub/sub
  *  4) LTE + auto   — EC200U UART; then background Trafyn firmware-check POST
- *  5) SPI + CAN    — MCP2515 on SPI2 (shared bus with SD)
- *  6) store_sd     — microSD mount on same SPI2 (CS GPIO18)
+ *  5) SPI + CAN    — MCP soft-SPI (separate GPIOs from SD SPI2)
+ *  6) store_sd     — microSD mount on hardware SPI2 (CS GPIO18)
  *  7) uplink       — produce→SD queue, drain→batch HTTPS POST
- *  8) serial/SoftAP— local console + Wi-Fi UI
- *  9) OTA confirm  — mark pending image valid (lab SoftAP health gate)
+ *  8) serial       — USB console (PC Carrier Console over serial)
+ *  9) OTA confirm  — mark pending image valid after console is up
  * 10) poller       — OBD PID polling (enabled by can_boot_task when link up)
  *
  * LTE auto-check (fw_ota_lte_start_auto): wait for registration → POST check →
@@ -103,6 +102,10 @@ void app_main(void)
 
     ESP_ERROR_CHECK(telemetry_bus_init());
     ESP_LOGI(TAG, "telemetry_bus ready");
+
+    ESP_ERROR_CHECK(transport_zigbee_init());
+    ESP_ERROR_CHECK(transport_zigbee_start());
+    ESP_LOGI(TAG, "transport_zigbee ready");
 
     /*
      * LTE (EC200U on UART1: GPIO16 TX / GPIO17 RX).
@@ -168,29 +171,37 @@ void app_main(void)
         }
     }
 
-    /* USB console: `ota url|run|force|status`, `lte`, `uplink`, … */
+    /* USB console: config, ota, lte, uplink, fleet, … — PC Carrier Console on serial. */
     ESP_ERROR_CHECK(transport_serial_start());
     ESP_LOGI(TAG, "transport_serial started");
 
-    /* SoftAP Fleet-C6 + REST/UI including SoftAP .bin upload and LTE OTA config. */
+#if CONFIG_ELM_HTTP_ENABLE
+    /* Optional legacy SoftAP + embedded HTTP (default off — use Carrier Console). */
     {
         esp_err_t http_err = transport_http_start();
         if (http_err != ESP_OK) {
-            ESP_LOGW(TAG, "transport_http_start: %s (continuing without SoftAP)",
-                     esp_err_to_name(http_err));
+            ESP_LOGW(TAG, "transport_http_start: %s", esp_err_to_name(http_err));
         } else {
             ESP_LOGI(TAG, "transport_http started");
         }
     }
+#endif
 
     /*
-     * After SoftAP is up: if this boot is a new OTA image in PENDING_VERIFY,
-     * mark it valid and cancel rollback (otadata). Lab gate = "HTTP came up".
+     * If this boot is a new OTA image in PENDING_VERIFY, mark it valid and cancel
+     * rollback (otadata). Runs after serial console is up.
      */
     {
-        esp_err_t ota_err = fw_ota_confirm_after_boot();
+        bool marked = false;
+        esp_err_t ota_err = fw_ota_confirm_after_boot(&marked);
         if (ota_err != ESP_OK) {
             ESP_LOGW(TAG, "fw_ota_confirm_after_boot: %s", esp_err_to_name(ota_err));
+        } else if (marked) {
+            esp_err_t c_err = fw_ota_lte_commit_pending_applied();
+            if (c_err != ESP_OK) {
+                ESP_LOGW(TAG, "fw_ota_lte_commit_pending_applied: %s",
+                         esp_err_to_name(c_err));
+            }
         }
     }
 

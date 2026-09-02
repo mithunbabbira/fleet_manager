@@ -1,0 +1,16 @@
+{
+  "manifest_version": 1,
+  "host_type": "template_host",
+  "host_type_id": 999,
+  "description": "Template host for fleet Zigbee integration",
+  "zigbee": {
+    "device_role": "end_device",
+    "report_interval_ms": 1000,
+    "max_airtime_bytes": 64
+  },
+  "required_header": ["device_id", "host_type_id", "seq", "ts_ms", "status"],
+  "readings": [
+    { "key": "value_a", "tlv_id": 16, "type": "float", "unit": "", "required": true },
+    { "key": "value_b", "tlv_id": 17, "type": "uint8" }
+  ]
+}

@@ -21,27 +21,31 @@ typedef enum {
     MCP_BITRATE_250K,
 } mcp_bitrate_t;
 
+/**
+ * @brief GPIO + RESET + verify config-mode CANSTAT (detect).
+ */
 esp_err_t mcp2515_init(int gpio_sck, int gpio_mosi, int gpio_miso, int gpio_cs,
                        int spi_clock_hz);
 
-/* Reset + bit timing + RX filter + Normal mode.
- * filter_id/filter_mask apply to both RX buffers; ext selects 29-bit. */
+/**
+ * @brief Bit timing, masks, RXF0/RXF2, Normal mode.
+ * @warning Unused RXFn left at reset defaults — program all filters (C1).
+ */
 esp_err_t mcp2515_configure(mcp_bitrate_t bitrate, bool ext,
                             uint32_t filter_id, uint32_t filter_mask);
 
-/* Queue a frame in TXB0 and request transmission (does not wait for ACK). */
+/** @brief Load TXB0 + RTS (does not wait for ACK). */
 esp_err_t mcp2515_send(const mcp_can_frame_t *frame);
 
-/* True once the last mcp2515_send was acked on the bus (TXREQ cleared). */
+/**
+ * @brief TXREQ clear — finished, aborted, or bus-off cleared request (not pure ACK).
+ */
 bool mcp2515_tx_done(void);
 
-/* Abort a pending (unacked) transmission. */
 void mcp2515_tx_abort(void);
 
-/* Non-blocking receive. Returns true if a frame was read. */
 bool mcp2515_receive(mcp_can_frame_t *frame);
 
-/* TEC/REC/EFLG snapshot for diagnostics. */
 void mcp2515_read_errors(uint8_t *tec, uint8_t *rec, uint8_t *eflg);
 
 #ifdef __cplusplus

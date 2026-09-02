@@ -14,6 +14,7 @@ typedef enum {
     TELEMETRY_DTC_LIST,
     TELEMETRY_ELM_EVENT,
     TELEMETRY_ERROR,
+    TELEMETRY_HOST_REPORT,
     TELEMETRY_TYPE_COUNT,
 } telemetry_msg_type_t;
 
@@ -22,7 +23,10 @@ typedef enum {
 #define TELEMETRY_MASK_DTC_LIST TELEMETRY_MASK(TELEMETRY_DTC_LIST)
 #define TELEMETRY_MASK_ELM_EVENT TELEMETRY_MASK(TELEMETRY_ELM_EVENT)
 #define TELEMETRY_MASK_ERROR TELEMETRY_MASK(TELEMETRY_ERROR)
+#define TELEMETRY_MASK_HOST_REPORT TELEMETRY_MASK(TELEMETRY_HOST_REPORT)
 #define TELEMETRY_MASK_ALL ((uint32_t)((1u << TELEMETRY_TYPE_COUNT) - 1))
+
+#define FLEET_MAX_READINGS_PER_REPORT 8
 
 typedef enum {
     TELEMETRY_ELM_EVENT_CONNECTED = 0,
@@ -72,33 +76,50 @@ typedef struct {
 } telemetry_error_msg_t;
 
 typedef struct {
+    char key[20];
+    double value;
+    char unit[8];
+    bool valid;
+} telemetry_host_reading_t;
+
+typedef struct {
+    char device_id[32];
+    char host_type[24];
+    uint16_t host_type_id;
+    uint8_t reading_count;
+    telemetry_host_reading_t readings[FLEET_MAX_READINGS_PER_REPORT];
+    uint64_t ts_ms;
+} telemetry_host_report_t;
+
+typedef struct {
     telemetry_msg_type_t type;
     union {
         telemetry_pid_sample_t pid_sample;
         telemetry_dtc_list_t dtc_list;
         telemetry_elm_event_t elm_event;
         telemetry_error_msg_t error;
+        telemetry_host_report_t host_report;
     };
 } telemetry_msg_t;
 
 #define TELEMETRY_MAX_SUBSCRIBERS 4
 #define TELEMETRY_QUEUE_DEPTH 16
 
-/** Reset the subscriber table. Must be called once before subscribe/publish. */
+/**
+ * @brief Reset in-process PID/event pub-sub subscriber table.
+ * @note Call once before subscribe/publish; clears slots under critical section.
+ */
 esp_err_t telemetry_bus_init(void);
 
 /**
- * Register a new subscriber queue filtered by a bitmask of (1 << TELEMETRY_*)
- * types. On success *out_queue holds a freshly created queue of depth
- * TELEMETRY_QUEUE_DEPTH; the caller owns it and receives telemetry_msg_t
- * copies via xQueueReceive.
+ * @brief Register a filtered subscriber queue (depth TELEMETRY_QUEUE_DEPTH).
+ * @note Caller owns the queue; table update is critical-section protected.
  */
 esp_err_t telemetry_subscribe(QueueHandle_t *out_queue, uint32_t filter_mask);
 
 /**
- * Non-blocking fan-out of msg to every subscriber whose filter mask matches
- * msg->type. Drops (and counts via sys_runtime "telemetry_drops") on a full
- * subscriber queue instead of blocking the publisher.
+ * @brief Non-blocking fan-out of @p msg to matching subscribers.
+ * @note Copies under spinlock then xQueueSend(..., 0); drops increment sys_runtime "telemetry_drops".
  */
 esp_err_t telemetry_publish(const telemetry_msg_t *msg);
 

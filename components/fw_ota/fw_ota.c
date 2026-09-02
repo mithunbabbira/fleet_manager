@@ -45,16 +45,27 @@ static bool s_sha_active;
  *
  * The actual boot choice is persisted in the `otadata` partition by ESP-IDF.
  */
+
+/**
+ * @brief Store a short human-readable failure reason for status queries.
+ */
 static void set_error(const char *msg)
 {
     snprintf(s_error, sizeof(s_error), "%s", msg ? msg : "error");
 }
 
+/**
+ * @brief Clear the last error string (successful begin / init).
+ */
 static void clear_error(void)
 {
     s_error[0] = '\0';
 }
 
+/**
+ * @brief Parse a 64-char hex SHA-256 into 32 binary bytes.
+ * @return false if length or hex digits are invalid.
+ */
 static bool parse_sha256_hex(const char *hex, uint8_t out[SHA256_BIN_LEN])
 {
     if (!hex || strlen(hex) != SHA256_HEX_LEN) {
@@ -72,6 +83,9 @@ static bool parse_sha256_hex(const char *hex, uint8_t out[SHA256_BIN_LEN])
     return true;
 }
 
+/**
+ * @brief Map fw_ota_state_t to a stable log/status string.
+ */
 static const char *state_str(fw_ota_state_t st)
 {
     switch (st) {
@@ -83,6 +97,10 @@ static const char *state_str(fw_ota_state_t st)
     }
 }
 
+/**
+ * @brief Create mutex (once) and force IDLE with a cleared error.
+ * @return ESP_OK, or ESP_ERR_NO_MEM if mutex create fails.
+ */
 esp_err_t fw_ota_init(void)
 {
     if (s_mu == NULL) {
@@ -97,7 +115,7 @@ esp_err_t fw_ota_init(void)
     return ESP_OK;
 }
 
-esp_err_t fw_ota_confirm_after_boot(void)
+esp_err_t fw_ota_confirm_after_boot(bool *marked_valid)
 {
     /*
      * Lab health gate:
@@ -106,6 +124,10 @@ esp_err_t fw_ota_confirm_after_boot(void)
      *
      * This runs after SoftAP/HTTP comes up (see main/app_main.c).
      */
+    if (marked_valid) {
+        *marked_valid = false;
+    }
+
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!running) {
         return ESP_ERR_NOT_FOUND;
@@ -130,17 +152,19 @@ esp_err_t fw_ota_confirm_after_boot(void)
         ESP_LOGE(TAG, "mark_app_valid failed: %s", esp_err_to_name(err));
         return err;
     }
+    if (marked_valid) {
+        *marked_valid = true;
+    }
     return ESP_OK;
 }
 
+/**
+ * @brief Begin dual-bank write: parse SHA, pick next slot, esp_ota_begin + SHA context.
+ * @note Sets FAILED and returns on bad SHA, missing partition, oversize, or begin error.
+ * @return ESP_OK when state becomes WRITING.
+ */
 esp_err_t fw_ota_begin(size_t expected_size, const char *sha256_hex)
 {
-    /*
-     * Start OTA write:
-     * - Parse manifest sha256 hex into bytes.
-     * - Choose the inactive slot using esp_ota_get_next_update_partition().
-     * - Begin esp_ota with expected_size so esp_ota_write() can stream chunks.
-     */
     if (!s_mu) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -195,6 +219,10 @@ esp_err_t fw_ota_begin(size_t expected_size, const char *sha256_hex)
     return ESP_OK;
 }
 
+/**
+ * @brief Stream one chunk under mutex; update SHA; abort on overflow or flash error.
+ * @note May call fw_ota_abort() after releasing the mutex on failure paths.
+ */
 esp_err_t fw_ota_write(const void *data, size_t len)
 {
     if (!data && len) {
@@ -236,6 +264,9 @@ esp_err_t fw_ota_write(const void *data, size_t len)
     return ESP_OK;
 }
 
+/**
+ * @brief Tear down SHA/OTA handles and mark FAILED if a write was active.
+ */
 esp_err_t fw_ota_abort(void)
 {
     if (!s_mu) {
@@ -265,17 +296,12 @@ esp_err_t fw_ota_abort(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Finalize write: exact size, SHA match, esp_ota_end, set boot, reboot.
+ * @note Success path calls esp_restart() and does not return; failures abort/return.
+ */
 esp_err_t fw_ota_end_and_reboot(void)
 {
-    /*
-     * Finish OTA and switch boot:
-     * - Verify we wrote exactly expected_size.
-     * - Finalize sha256 and compare with manifest sha256.
-     * - esp_ota_end() commits the image into the inactive slot.
-     * - esp_ota_set_boot_partition(s_update) updates otadata so next reboot runs
-     *   the new slot.
-     * - esp_restart() reboots; success does not return.
-     */
     if (!s_mu) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -331,6 +357,9 @@ esp_err_t fw_ota_end_and_reboot(void)
     return ESP_OK; /* not reached */
 }
 
+/**
+ * @brief Fill @p out with mutex-protected session fields plus running-partition info.
+ */
 esp_err_t fw_ota_get_status(fw_ota_status_t *out)
 {
     if (!out) {
@@ -372,6 +401,9 @@ esp_err_t fw_ota_get_status(fw_ota_status_t *out)
     return ESP_OK;
 }
 
+/**
+ * @brief Convenience busy check for SoftAP/LTE to refuse overlapping updates.
+ */
 bool fw_ota_is_busy(void)
 {
     fw_ota_status_t st;

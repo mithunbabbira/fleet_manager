@@ -33,11 +33,16 @@ static uint64_t s_head;
 static uint32_t s_count;
 static char s_last_err[80];
 
+/** @brief Copy last-error string into s_last_err. */
 static void set_err(const char *msg)
 {
     snprintf(s_last_err, sizeof(s_last_err), "%s", msg ? msg : "");
 }
 
+/**
+ * @brief Create SPI2 and queue mutexes (idempotent).
+ * @note Shared with MCP soft-SPI CS discipline on SPI2.
+ */
 esp_err_t store_sd_spi_lock_init(void)
 {
     if (s_spi_mu == NULL) {
@@ -55,6 +60,10 @@ esp_err_t store_sd_spi_lock_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Force SD + MCP CS lines idle-HIGH before SPI use.
+ * @note Prevents floating SD CS from fighting MCP2515 on MISO.
+ */
 void store_sd_spi_cs_idle_high(void)
 {
 #if CONFIG_STORE_SD_ENABLE
@@ -82,6 +91,7 @@ void store_sd_spi_cs_idle_high(void)
     }
 }
 
+/** @brief Take SPI2 mutex with @p timeout_ms. */
 esp_err_t store_sd_spi_lock(uint32_t timeout_ms)
 {
     if (s_spi_mu == NULL) {
@@ -92,6 +102,7 @@ esp_err_t store_sd_spi_lock(uint32_t timeout_ms)
                : ESP_ERR_TIMEOUT;
 }
 
+/** @brief Give SPI2 mutex. */
 void store_sd_spi_unlock(void)
 {
     if (s_spi_mu) {
@@ -99,6 +110,7 @@ void store_sd_spi_unlock(void)
     }
 }
 
+/** @brief Write head/count meta file (caller holds SPI lock). */
 static esp_err_t meta_save_unlocked(void)
 {
     FILE *f = fopen(META_PATH, "w");
@@ -116,6 +128,7 @@ static esp_err_t meta_save_unlocked(void)
     return ESP_OK;
 }
 
+/** @brief Load head/count from meta (missing file → zeros). */
 static esp_err_t meta_load_unlocked(void)
 {
     s_head = 0;
@@ -138,6 +151,7 @@ static esp_err_t meta_load_unlocked(void)
     return ESP_OK;
 }
 
+/** @brief Return file size via stat, or 0 if missing. */
 static uint64_t file_size_unlocked(const char *path)
 {
     struct stat st;
@@ -147,6 +161,7 @@ static uint64_t file_size_unlocked(const char *path)
     return (uint64_t)st.st_size;
 }
 
+/** @brief Measure one NDJSON line length at @p offset (includes newline). */
 static esp_err_t line_len_at_unlocked(uint64_t offset, size_t *out_len)
 {
     FILE *f = fopen(QUEUE_PATH, "r");
@@ -177,6 +192,7 @@ static esp_err_t line_len_at_unlocked(uint64_t offset, size_t *out_len)
     return ESP_OK;
 }
 
+/** @brief Advance head past oldest line; reset queue if corrupt. */
 static esp_err_t drop_oldest_unlocked(void)
 {
     size_t len = 0;
@@ -195,6 +211,7 @@ static esp_err_t drop_oldest_unlocked(void)
     return meta_save_unlocked();
 }
 
+/** @brief Rewrite queue file from head; reset head to 0. */
 static esp_err_t compact_unlocked(void)
 {
     if (s_head == 0) {
@@ -234,6 +251,10 @@ static esp_err_t compact_unlocked(void)
 }
 
 #if CONFIG_STORE_SD_ENABLE
+/**
+ * @brief Init SPI2 SDSPI host and mount FAT at /sdcard.
+ * @note MCP uses soft-SPI elsewhere; C6 has one GPSPI — SD owns SPI2.
+ */
 static esp_err_t mount_card(void)
 {
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -279,6 +300,10 @@ static esp_err_t mount_card(void)
 }
 #endif
 
+/**
+ * @brief Mount card (if enabled), load queue meta, sanity-check head.
+ * @note Takes SPI lock around mount and meta I/O.
+ */
 esp_err_t store_sd_init(void)
 {
     esp_err_t err = store_sd_spi_lock_init();
@@ -339,11 +364,15 @@ esp_err_t store_sd_init(void)
 #endif
 }
 
+/** @brief True after successful mount. */
 bool store_sd_is_mounted(void)
 {
     return s_mounted;
 }
 
+/**
+ * @brief Fill status snapshot (depth/pending under queue+SPI locks).
+ */
 esp_err_t store_sd_get_status(store_sd_status_t *out)
 {
     if (out == NULL) {
@@ -368,6 +397,10 @@ esp_err_t store_sd_get_status(store_sd_status_t *out)
     return ESP_OK;
 }
 
+/**
+ * @brief Append NDJSON line to uplink queue; drop oldest if over max bytes.
+ * @note Holds queue then SPI locks; may compact after append.
+ */
 esp_err_t store_sd_enqueue_line(const char *line, size_t line_len)
 {
     if (!s_mounted || line == NULL || line_len == 0) {
@@ -446,6 +479,10 @@ esp_err_t store_sd_enqueue_line(const char *line, size_t line_len)
     return err;
 }
 
+/**
+ * @brief Read up to @p max_lines from head without advancing.
+ * @note Holds queue then SPI locks; @p *out_byte_span for later ack.
+ */
 esp_err_t store_sd_peek_lines(char *buf, size_t buf_len, size_t max_lines,
                               size_t *out_lines, size_t *out_byte_span)
 {
@@ -524,6 +561,10 @@ esp_err_t store_sd_peek_lines(char *buf, size_t buf_len, size_t max_lines,
     return err;
 }
 
+/**
+ * @brief Advance head by @p byte_span / @p lines after successful POST.
+ * @note Holds queue then SPI locks; may compact or truncate when empty.
+ */
 esp_err_t store_sd_ack_bytes(size_t byte_span, size_t lines)
 {
     if (!s_mounted) {

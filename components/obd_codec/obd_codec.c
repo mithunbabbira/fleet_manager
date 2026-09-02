@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/** @brief Hex digit value 0–15, or -1 if not hex. */
 static int hex_nibble(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -39,6 +40,7 @@ static int extract_hex_bytes(const char *in, uint8_t *out, int max_out)
     return n;
 }
 
+/** @brief Format 16-bit DTC as P0xxx-style string (5 chars + NUL). */
 static void dtc_to_string(uint16_t raw, char out[6])
 {
     const char *sys = "PCBU";

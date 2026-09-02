@@ -30,6 +30,7 @@ void cmd_policy_normalize(const char *in, char *out, size_t out_len)
     out[j] = '\0';
 }
 
+/** @brief True if s is non-empty and all hex digits. */
 static bool is_hex_str(const char *s)
 {
     if (!s || !*s) {
@@ -43,6 +44,7 @@ static bool is_hex_str(const char *s)
     return true;
 }
 
+/** @brief OBD service mode from normalized hex cmd, or -1 (AT / invalid). */
 static int parse_mode(const char *norm)
 {
     size_t len = strlen(norm);
@@ -62,6 +64,7 @@ static int parse_mode(const char *norm)
     return (int)mode;
 }
 
+/** @brief True if normalized AT cmd is on the v1 allowlist. */
 static bool at_allowed(const char *norm)
 {
     for (size_t i = 0; i < sizeof(k_at_allow) / sizeof(k_at_allow[0]); ++i) {

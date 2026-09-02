@@ -40,7 +40,11 @@ static const char *TAG = "mcp2515";
 #define REG_RXM0SIDH  0x20
 #define REG_RXM1SIDH  0x24
 #define REG_RXF0SIDH  0x00
+#define REG_RXF1SIDH  0x04
 #define REG_RXF2SIDH  0x08
+#define REG_RXF3SIDH  0x10
+#define REG_RXF4SIDH  0x14
+#define REG_RXF5SIDH  0x18
 
 #define INTF_RX0IF 0x01
 #define INTF_RX1IF 0x02
@@ -91,6 +95,7 @@ static uint8_t soft_spi_byte(uint8_t out)
     return in;
 }
 
+/** @brief CS-framed Mode 0 transfer (spi_clock_hz currently ignored — bitbang rate). */
 static void soft_spi_xfer(const uint8_t *tx, uint8_t *rx, size_t n)
 {
     cs_l();
@@ -175,6 +180,9 @@ static bool unpack_rx_id(const uint8_t regs[4], uint32_t *id, bool *ext)
     return true;
 }
 
+/**
+ * @brief GPIO + RESET + verify config-mode CANSTAT (detect).
+ */
 esp_err_t mcp2515_init(int gpio_sck, int gpio_mosi, int gpio_miso, int gpio_cs,
                        int spi_clock_hz)
 {
@@ -217,6 +225,10 @@ esp_err_t mcp2515_init(int gpio_sck, int gpio_mosi, int gpio_miso, int gpio_cs,
     return ESP_OK;
 }
 
+/**
+ * @brief Bit timing, masks, all RXF0–RXF5 filters, Normal mode.
+ * @warning Unused RXFn left at reset defaults — program all filters (C1).
+ */
 esp_err_t mcp2515_configure(mcp_bitrate_t bitrate, bool ext,
                             uint32_t filter_id, uint32_t filter_mask)
 {
@@ -232,9 +244,15 @@ esp_err_t mcp2515_configure(mcp_bitrate_t bitrate, bool ext,
     pack_id(filter_mask, ext, packed);
     write_regs(REG_RXM0SIDH, packed, 4);
     write_regs(REG_RXM1SIDH, packed, 4);
+    /* Program ALL acceptance filters — unused RXFn left at reset 0 would match
+     * std IDs 0x000–0x007 under a typical OBD mask (RXB0=F0|F1, RXB1=F2–F5). */
     pack_id(filter_id, ext, packed);
     write_regs(REG_RXF0SIDH, packed, 4);
+    write_regs(REG_RXF1SIDH, packed, 4);
     write_regs(REG_RXF2SIDH, packed, 4);
+    write_regs(REG_RXF3SIDH, packed, 4);
+    write_regs(REG_RXF4SIDH, packed, 4);
+    write_regs(REG_RXF5SIDH, packed, 4);
 
     write_reg(REG_RXB0CTRL, 0x04); /* filtered, rollover to RXB1 */
     write_reg(REG_RXB1CTRL, 0x00); /* filtered */
@@ -250,6 +268,7 @@ esp_err_t mcp2515_configure(mcp_bitrate_t bitrate, bool ext,
     return ESP_OK;
 }
 
+/** @brief Load TXB0 + RTS (does not wait for ACK). */
 esp_err_t mcp2515_send(const mcp_can_frame_t *frame)
 {
     if (frame == NULL || frame->dlc > 8) {
@@ -267,6 +286,9 @@ esp_err_t mcp2515_send(const mcp_can_frame_t *frame)
     return spi_cmd(CMD_RTS_TXB0);
 }
 
+/**
+ * @brief TXREQ clear — finished, aborted, or bus-off cleared request (not pure ACK).
+ */
 bool mcp2515_tx_done(void)
 {
     return (read_reg(REG_TXB0CTRL) & TXB_TXREQ) == 0;

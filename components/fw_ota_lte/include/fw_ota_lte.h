@@ -36,25 +36,50 @@ typedef struct {
     size_t bytes_downloaded;
 } fw_ota_lte_status_t;
 
+/**
+ * @brief Create OTA mutex; load NVS config and ota_applied; phase IDLE.
+ * @note Call once before other APIs (no NULL guard on s_mu elsewhere).
+ */
 esp_err_t fw_ota_lte_init(void);
 esp_err_t fw_ota_lte_get_config(fw_ota_lte_config_t *out);
+/**
+ * @brief Replace config, sanitize legacy lab URLs, persist (incl. uplink_did).
+ * @note Does not refresh telemetry_uplink's in-RAM device_id.
+ */
 esp_err_t fw_ota_lte_set_config(const fw_ota_lte_config_t *in);
 esp_err_t fw_ota_lte_get_status(fw_ota_lte_status_t *out);
 
-/** Blocking check+update (call from worker task, not httpd). */
+/**
+ * @brief Blocking Trafyn check → optional stream/flash/reboot.
+ * @warning Does NOT suspend BG AT; prefer start_background.
+ * @note On successful download, writes ota_pend (not ota_applied). Promote via
+ *       fw_ota_lte_commit_pending_applied() after fw_ota_confirm_after_boot marks valid.
+ *       Does not return on successful reboot.
+ */
 esp_err_t fw_ota_lte_run(void);
 
-/** Spawn background task to run fw_ota_lte_run(). Returns ESP_ERR_INVALID_STATE if busy. */
+/**
+ * @brief Promote NVS ota_pend → ota_applied after a successful boot verify.
+ * @note Call when fw_ota_confirm_after_boot sets marked_valid. Clears ota_pend.
+ *       No-op if no pending version is stored.
+ */
+esp_err_t fw_ota_lte_commit_pending_applied(void);
+
+/**
+ * @brief Spawn worker: suspend_bg_at → run → resume. Rejects if s_task or fw_ota busy.
+ */
 esp_err_t fw_ota_lte_start_background(void);
 
 /**
- * Start long-lived auto-check (wait for LTE → check → sleep interval → repeat).
- * No-op / ESP_ERR_NOT_SUPPORTED when CONFIG_FW_OTA_LTE_AUTO_CHECK is unset.
- * Auto path always uses force=false.
+ * @brief Start periodic auto-check task (wait LTE → background OTA → sleep hours).
+ * @note No-op / ESP_ERR_NOT_SUPPORTED when CONFIG_FW_OTA_LTE_AUTO_CHECK is unset.
+ *       Auto path always uses force=false.
  */
 esp_err_t fw_ota_lte_start_auto(void);
 
-/** True while LTE OTA check/download/reboot is in progress. */
+/**
+ * @brief True if phase CHECKING/DOWNLOADING/REBOOTING or worker task alive.
+ */
 bool fw_ota_lte_is_busy(void);
 
 #ifdef __cplusplus

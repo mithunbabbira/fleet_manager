@@ -17,42 +17,59 @@ typedef struct {
     char last_error[80];
 } store_sd_status_t;
 
-/** Create SPI bus mutex (safe to call before CAN). */
+/**
+ * @brief Create SPI2 and queue mutexes (idempotent).
+ * @note Safe before CAN; shared with MCP soft-SPI CS discipline.
+ */
 esp_err_t store_sd_spi_lock_init(void);
 
 /**
- * Drive SD CS (and optionally MCP CS) idle-HIGH before any SPI traffic.
- * Required on a shared bus: a floating SD CS lets the card fight MCP2515 on MISO.
+ * @brief Drive SD (+ MCP) CS idle-HIGH before any SPI traffic.
+ * @note Required on shared bus so a floating SD CS cannot fight MCP2515 on MISO.
  */
 void store_sd_spi_cs_idle_high(void);
 
-/** Serialize SPI2 use between MCP2515 and SDSPI/FatFS. */
+/**
+ * @brief Take the SPI2 mutex (MCP2515 vs SDSPI/FatFS).
+ * @note Timeout returns ESP_ERR_TIMEOUT; pair with store_sd_spi_unlock.
+ */
 esp_err_t store_sd_spi_lock(uint32_t timeout_ms);
+
+/** @brief Release the SPI2 mutex. */
 void store_sd_spi_unlock(void);
 
 /**
- * Mount FAT on SDSPI (CS from Kconfig). SPI2 may already be initialized by MCP2515.
- * Returns ESP_OK if mounted, ESP_ERR_NOT_FOUND / other on failure (non-fatal for boot).
+ * @brief Mount FAT on SDSPI (CS from Kconfig); load uplink queue meta.
+ * @note SPI2 may already be up; holds SPI lock during mount. Non-fatal if card missing.
  */
 esp_err_t store_sd_init(void);
 
+/** @brief True after a successful store_sd_init mount. */
 bool store_sd_is_mounted(void);
+
+/**
+ * @brief Snapshot mount flag, queue depth/bytes, and last error.
+ * @note Takes queue then SPI locks briefly when mounted.
+ */
 esp_err_t store_sd_get_status(store_sd_status_t *out);
 
 /**
- * Append one NDJSON line (object without trailing newline). Drops oldest when full.
- * line_len is strlen; newline is written by this API.
+ * @brief Append one NDJSON line to the microSD uplink queue; drop oldest if full.
+ * @note Holds queue + SPI locks; newline appended by this API.
  */
 esp_err_t store_sd_enqueue_line(const char *line, size_t line_len);
 
 /**
- * Peek up to max_lines from head into buf (NUL-terminated, lines separated by '\\n').
- * *out_byte_span is bytes to ack (including newlines), *out_lines is count.
+ * @brief Peek up to @p max_lines from queue head into @p buf (NUL-terminated).
+ * @note Does not advance head; @p *out_byte_span includes newlines for later ack.
  */
 esp_err_t store_sd_peek_lines(char *buf, size_t buf_len, size_t max_lines,
                               size_t *out_lines, size_t *out_byte_span);
 
-/** Advance head after successful batch POST. */
+/**
+ * @brief Advance queue head after a successful uplink batch POST.
+ * @note Holds queue + SPI locks; may compact/truncate when empty.
+ */
 esp_err_t store_sd_ack_bytes(size_t byte_span, size_t lines);
 
 #ifdef __cplusplus

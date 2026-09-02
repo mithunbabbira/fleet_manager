@@ -1,7 +1,7 @@
 menu "EC200U LTE (net_lte)"
 
     config NET_LTE_ENABLE
-        bool "Enable EC200U LTE UART / PPP"
+        bool "Enable EC200U LTE UART (QHTTP AT)"
         default y
         help
             Uses UART1 GPIO16 (ESP TX → modem RX) / GPIO17 (ESP RX ← modem TX).

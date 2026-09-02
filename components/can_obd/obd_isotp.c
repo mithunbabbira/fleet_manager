@@ -23,6 +23,7 @@ static int hex_nibble(char c)
     return -1;
 }
 
+/** @brief Build padded 8-byte SF from hex cmd (max 7 data bytes). */
 int obd_isotp_build_sf(const char *cmd_hex, uint8_t out[8])
 {
     if (cmd_hex == NULL || out == NULL) {
@@ -54,6 +55,10 @@ void obd_isotp_rx_reset(obd_isotp_rx_t *rx)
     memset(rx, 0, sizeof(*rx));
 }
 
+/**
+ * @brief Feed one CAN frame: SF complete / FF→NEED_FC / CF assemble.
+ * @note Payloads >64 ignored (no Overflow FC); fine for typical OBD.
+ */
 obd_isotp_rx_status_t obd_isotp_rx_feed(obd_isotp_rx_t *rx, uint32_t can_id,
                                         const uint8_t *data, uint8_t dlc)
 {
@@ -144,6 +149,7 @@ int obd_isotp_payload_hex(const obd_isotp_rx_t *rx, char *out, size_t out_len)
     return (int)(rx->got_len * 2);
 }
 
+/** @brief CTS FC, BS=0, STmin=0. */
 void obd_isotp_build_fc(uint8_t out[8])
 {
     memset(out, FRAME_PAD, 8);

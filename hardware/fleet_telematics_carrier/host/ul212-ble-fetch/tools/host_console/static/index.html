@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UL212 Host Console</title>
+  <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>UL212 Host Console</h1>
+      <div class="header-actions">
+        <span class="pill" id="linkPill">disconnected</span>
+        <button type="button" id="quitBtn" class="danger" title="Stop this PC app (does not reboot ESP32)">Quit app</button>
+      </div>
+    </header>
+
+    <section class="card conn">
+      <label>Serial port</label>
+      <div class="row">
+        <select id="portSel"></select>
+        <button type="button" id="refreshBtn">Refresh</button>
+        <button type="button" id="connectBtn" class="primary">Connect</button>
+        <button type="button" id="disconnectBtn">Disconnect</button>
+      </div>
+      <p class="hint">ESP32 sends data over USB serial only. This page runs on your computer.</p>
+    </section>
+
+    <section class="hero card">
+      <div class="label">Liquid height</div>
+      <div class="value" id="height">--<span>mm</span></div>
+      <div class="sub" id="meta">signal -- · BLE -- · Zigbee --</div>
+    </section>
+
+    <div class="grid2">
+      <section class="card">
+        <h2>Provision</h2>
+        <label>Sensor MAC</label>
+        <input id="macIn" placeholder="AA:BB:CC:DD:EE:FF">
+        <label>Device ID</label>
+        <input id="idIn" placeholder="ul212-001">
+        <div class="row2">
+          <div><label>Poll ms</label><input id="pollIn" type="number" min="200" value="1000"></div>
+          <div><label>Silence ms</label><input id="silIn" type="number" min="3000" value="10000"></div>
+        </div>
+        <div class="row actions">
+          <button type="button" id="scanBtn">Scan BLE</button>
+          <button type="button" id="statusBtn">Status</button>
+          <button type="button" id="applyBtn" class="primary">Apply &amp; Save</button>
+          <button type="button" id="rebootBtn">Reboot</button>
+        </div>
+        <div id="scanOut" class="scan-out"></div>
+      </section>
+
+      <section class="card log-card">
+        <h2>Serial log</h2>
+        <pre id="log"></pre>
+      </section>
+    </div>
+  </div>
+  <script src="/static/app.js?v=3"></script>
+</body>
+</html>

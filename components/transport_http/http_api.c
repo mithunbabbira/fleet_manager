@@ -15,6 +15,8 @@
 #include "telemetry_uplink.h"
 
 #include "cJSON.h"
+#include "host_registry.h"
+#include "transport_zigbee.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -40,7 +42,7 @@ static const char *TAG = "http_api";
 #define MAX_PROFILE_NAMES    16
 
 #define TELE_CACHE_CAP        8
-#define TELE_CACHE_TASK_STACK 3072
+#define TELE_CACHE_TASK_STACK 8192
 #define TELE_CACHE_TASK_PRIO  3
 
 /* ---- telemetry cache (subscriber task feeds GET /api/telemetry) -------- */
@@ -63,11 +65,13 @@ static bool s_have_error;
 static telemetry_dtc_list_t s_last_dtc;
 static bool s_have_dtc;
 
+/** @brief Monotonic time in milliseconds. */
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000);
 }
 
+/** @brief Push a PID sample into the telemetry ring (caller holds mutex). */
 static void pid_ring_push_locked(const telemetry_pid_sample_t *s)
 {
     s_pid_ring.items[s_pid_ring.next] = *s;
@@ -77,6 +81,7 @@ static void pid_ring_push_locked(const telemetry_pid_sample_t *s)
     }
 }
 
+/** @brief Subscriber task that caches telemetry for GET /api/telemetry. */
 static void telemetry_cache_task(void *arg)
 {
     (void)arg;
@@ -112,6 +117,7 @@ static void telemetry_cache_task(void *arg)
     }
 }
 
+/** @brief Start telemetry bus subscription + cache task once. */
 static esp_err_t telemetry_cache_start(void)
 {
     if (s_cache_task_handle != NULL) {
@@ -168,6 +174,7 @@ static esp_err_t read_body(httpd_req_t *req, char *buf, size_t buf_len)
     return ESP_OK;
 }
 
+/** @brief Send cJSON as application/json (deletes root). */
 static esp_err_t send_json(httpd_req_t *req, const char *http_status, cJSON *root)
 {
     char *text = cJSON_PrintUnformatted(root);
@@ -183,11 +190,13 @@ static esp_err_t send_json(httpd_req_t *req, const char *http_status, cJSON *roo
     return err;
 }
 
+/** @brief Send 200 OK JSON response. */
 static esp_err_t send_ok_json(httpd_req_t *req, cJSON *root)
 {
     return send_json(req, HTTPD_200, root);
 }
 
+/** @brief Send JSON error object with given HTTP status. */
 static esp_err_t send_error_json(httpd_req_t *req, const char *http_status, const char *error,
                                   const char *message)
 {
@@ -199,6 +208,7 @@ static esp_err_t send_error_json(httpd_req_t *req, const char *http_status, cons
     return send_json(req, http_status, root);
 }
 
+/** @brief Attach runtime metrics object to a JSON root. */
 static void attach_metrics(cJSON *root)
 {
     char buf[METRICS_BUF_LEN];
@@ -207,6 +217,7 @@ static void attach_metrics(cJSON *root)
     cJSON_AddItemToObject(root, "metrics", metrics ? metrics : cJSON_CreateObject());
 }
 
+/** @brief Attach a decoded OBD value object to a JSON root. */
 static void attach_decoded(cJSON *root, const obd_decoded_t *d)
 {
     cJSON *dec = cJSON_CreateObject();
@@ -266,6 +277,7 @@ static void try_decode(const char *norm_cmd, const char *resp, cJSON *root)
 
 /* ---- obd_profile_t <-> cJSON (mirrors profile_store's private mapping) - */
 
+/** @brief Parse profile JSON into obd_profile_t. */
 static esp_err_t parse_profile_json(const cJSON *root, obd_profile_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -320,6 +332,7 @@ static esp_err_t parse_profile_json(const cJSON *root, obd_profile_t *out)
 
 /* ---- GET /api/status ----------------------------------------------------- */
 
+/** @brief GET /api/status — CAN readiness, protocol, profile, metrics. */
 static esp_err_t api_status_get(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "GET /api/status");
@@ -348,6 +361,7 @@ static esp_err_t api_status_get(httpd_req_t *req)
 
 /* ---- POST /api/obd/cmd ------------------------------------------------------- */
 
+/** @brief POST /api/obd/cmd — submit raw OBD command (policy-gated). */
 static esp_err_t api_obd_cmd_post(httpd_req_t *req)
 {
     if (!can_obd_is_ready()) {
@@ -423,6 +437,7 @@ static esp_err_t api_obd_cmd_post(httpd_req_t *req)
 
 /* ---- GET/PUT /api/profiles --------------------------------------------------- */
 
+/** @brief GET /api/profiles — list profiles and active name. */
 static esp_err_t api_profiles_get(httpd_req_t *req)
 {
     char names[MAX_PROFILE_NAMES][32];
@@ -450,6 +465,7 @@ static esp_err_t api_profiles_get(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief PUT /api/profiles — upsert a profile from JSON body. */
 static esp_err_t api_profiles_put(httpd_req_t *req)
 {
     char *body = malloc(PROFILE_BODY_BUF_LEN);
@@ -492,6 +508,7 @@ static esp_err_t api_profiles_put(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief Dispatch GET/PUT /api/profiles. */
 static esp_err_t api_profiles_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -502,6 +519,7 @@ static esp_err_t api_profiles_handler(httpd_req_t *req)
 
 /* ---- POST /api/profiles/active ----------------------------------------------- */
 
+/** @brief POST /api/profiles/active — set active profile and reload poller. */
 static esp_err_t api_profiles_active_post(httpd_req_t *req)
 {
     char body[REQ_BODY_BUF_LEN];
@@ -546,6 +564,7 @@ static esp_err_t api_profiles_active_post(httpd_req_t *req)
 
 /* ---- GET /api/telemetry ------------------------------------------------------- */
 
+/** @brief GET /api/telemetry — cached PID samples, last event/error/DTC. */
 static esp_err_t api_telemetry_get(httpd_req_t *req)
 {
     pid_ring_t ring_snapshot;
@@ -634,6 +653,7 @@ static esp_err_t api_telemetry_get(httpd_req_t *req)
 
 /* ---- GET /api/metrics ---------------------------------------------------------- */
 
+/** @brief GET /api/metrics — raw runtime metrics JSON. */
 static esp_err_t api_metrics_get(httpd_req_t *req)
 {
     char buf[METRICS_BUF_LEN];
@@ -644,6 +664,7 @@ static esp_err_t api_metrics_get(httpd_req_t *req)
 
 /* ---- GET /api/lte  and  POST /api/lte/reconnect ----------------------------- */
 
+/** @brief Fill JSON with net_lte_status_t fields. */
 static void add_lte_json(cJSON *root, const net_lte_status_t *s)
 {
     cJSON_AddBoolToObject(root, "enabled", s->enabled);
@@ -662,6 +683,7 @@ static void add_lte_json(cJSON *root, const net_lte_status_t *s)
     cJSON_AddStringToObject(root, "last_error", s->last_error);
 }
 
+/** @brief GET /api/lte — live modem status after refresh. */
 static esp_err_t api_lte_get(httpd_req_t *req)
 {
     (void)net_lte_refresh();
@@ -672,6 +694,7 @@ static esp_err_t api_lte_get(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief POST /api/lte/reconnect — trigger modem reconnect. */
 static esp_err_t api_lte_reconnect_post(httpd_req_t *req)
 {
     esp_err_t err = net_lte_reconnect();
@@ -686,6 +709,7 @@ static esp_err_t api_lte_reconnect_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief POST /api/lte/test — run modem internet self-test. */
 static esp_err_t api_lte_test_post(httpd_req_t *req)
 {
     char report[768];
@@ -705,6 +729,7 @@ static esp_err_t api_lte_test_post(httpd_req_t *req)
 
 /* ---- Cloud uplink ---------------------------------------------------------- */
 
+/** @brief Fill JSON with telemetry_uplink status/config/queue. */
 static void add_uplink_json(cJSON *root, const telemetry_uplink_status_t *st)
 {
     cJSON_AddBoolToObject(root, "enabled", st->config.enabled);
@@ -736,6 +761,7 @@ static void add_uplink_json(cJSON *root, const telemetry_uplink_status_t *st)
     cJSON_AddItemToObject(root, "queue", q);
 }
 
+/** @brief GET /api/uplink — cloud uplink status. */
 static esp_err_t api_uplink_get(httpd_req_t *req)
 {
     telemetry_uplink_status_t st;
@@ -748,6 +774,7 @@ static esp_err_t api_uplink_get(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief POST /api/uplink — update enabled/interval/device_id/node_id. */
 static esp_err_t api_uplink_post(httpd_req_t *req)
 {
     char body[320];
@@ -805,6 +832,7 @@ static esp_err_t api_uplink_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief Dispatch GET/POST /api/uplink. */
 static esp_err_t api_uplink_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -813,6 +841,7 @@ static esp_err_t api_uplink_handler(httpd_req_t *req)
     return api_uplink_post(req);
 }
 
+/** @brief POST /api/uplink/send — force an immediate uplink POST. */
 static esp_err_t api_uplink_send_post(httpd_req_t *req)
 {
     esp_err_t err = telemetry_uplink_send_now();
@@ -829,6 +858,7 @@ static esp_err_t api_uplink_send_post(httpd_req_t *req)
 
 /* ---- diagnostics: DTC read / clear, VIN ------------------------------------- */
 
+/** @brief Submit raw OBD via poller; on failure fill err_root/http_status. */
 static esp_err_t run_obd_raw(const char *cmd, char *resp, size_t resp_len,
                              cJSON **err_root, const char **http_status)
 {
@@ -865,6 +895,7 @@ static esp_err_t run_obd_raw(const char *cmd, char *resp, size_t resp_len,
     return ESP_OK;
 }
 
+/** @brief POST /api/dtc/read — Mode 03/07 DTC lists. */
 static esp_err_t api_dtc_read_post(httpd_req_t *req)
 {
     if (!can_obd_is_ready()) {
@@ -902,6 +933,7 @@ static esp_err_t api_dtc_read_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief POST /api/dtc/clear — Mode 04 clear (requires allow_unsafe). */
 static esp_err_t api_dtc_clear_post(httpd_req_t *req)
 {
     if (!can_obd_is_ready()) {
@@ -924,6 +956,7 @@ static esp_err_t api_dtc_clear_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief GET /api/vin — Mode 09 PID 02 VIN decode. */
 static esp_err_t api_vin_get(httpd_req_t *req)
 {
     if (!can_obd_is_ready()) {
@@ -953,6 +986,7 @@ static esp_err_t api_vin_get(httpd_req_t *req)
 
 /* ---- GET/POST /api/safety --------------------------------------------------- */
 
+/** @brief GET /api/safety — allow_unsafe flag. */
 static esp_err_t api_safety_get(httpd_req_t *req)
 {
     cmd_policy_config_t safety;
@@ -966,6 +1000,7 @@ static esp_err_t api_safety_get(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief POST /api/safety — persist allow_unsafe. */
 static esp_err_t api_safety_post(httpd_req_t *req)
 {
     char body[REQ_BODY_BUF_LEN];
@@ -993,6 +1028,7 @@ static esp_err_t api_safety_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief Dispatch GET/POST /api/safety. */
 static esp_err_t api_safety_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -1003,6 +1039,7 @@ static esp_err_t api_safety_handler(httpd_req_t *req)
 
 /* ---- GET/POST /api/ota ------------------------------------------------------ */
 
+/** @brief Map fw_ota_state_t to a short string. */
 static const char *fw_ota_state_name(fw_ota_state_t st)
 {
     switch (st) {
@@ -1014,6 +1051,7 @@ static const char *fw_ota_state_name(fw_ota_state_t st)
     }
 }
 
+/** @brief GET /api/ota — local fw_ota status (stats only; no SoftAP bin upload). */
 static esp_err_t api_ota_get(httpd_req_t *req)
 {
     fw_ota_status_t st;
@@ -1053,12 +1091,14 @@ static esp_err_t api_ota_get(httpd_req_t *req)
  * Auto-check (boot-time / periodic) uses force=false and the same check URL
  * (Kconfig default or NVS ota_manif override).
  */
+/** @brief POST /api/ota — rejected; SoftAP does not accept firmware bins. */
 static esp_err_t api_ota_post(httpd_req_t *req)
 {
     return send_error_json(req, "405 Method Not Allowed", "upload_disabled",
                            "firmware updates are LTE-only");
 }
 
+/** @brief Dispatch GET/POST /api/ota. */
 static esp_err_t api_ota_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -1067,6 +1107,7 @@ static esp_err_t api_ota_handler(httpd_req_t *req)
     return api_ota_post(req);
 }
 
+/** @brief Map fw_ota_lte_phase_t to a short string. */
 static const char *lte_phase_name(fw_ota_lte_phase_t p)
 {
     switch (p) {
@@ -1080,6 +1121,7 @@ static const char *lte_phase_name(fw_ota_lte_phase_t p)
     }
 }
 
+/** @brief GET /api/ota/lte — LTE OTA config + phase/progress (no bin upload). */
 static esp_err_t api_ota_lte_get(httpd_req_t *req)
 {
     fw_ota_lte_config_t cfg;
@@ -1108,6 +1150,7 @@ static esp_err_t api_ota_lte_get(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/** @brief POST /api/ota/lte — persist device_id/force only (not check URL). */
 static esp_err_t api_ota_lte_post(httpd_req_t *req)
 {
     char body[512];
@@ -1139,6 +1182,7 @@ static esp_err_t api_ota_lte_post(httpd_req_t *req)
     return api_ota_lte_get(req);
 }
 
+/** @brief Dispatch GET/POST /api/ota/lte. */
 static esp_err_t api_ota_lte_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -1147,6 +1191,7 @@ static esp_err_t api_ota_lte_handler(httpd_req_t *req)
     return api_ota_lte_post(req);
 }
 
+/** @brief POST /api/ota/lte/run — start background LTE OTA. */
 static esp_err_t api_ota_lte_run_post(httpd_req_t *req)
 {
     esp_err_t err = fw_ota_lte_start_background();
@@ -1162,8 +1207,62 @@ static esp_err_t api_ota_lte_run_post(httpd_req_t *req)
     return send_ok_json(req, root);
 }
 
+/* ---- GET /api/fleet/hosts --------------------------------------------------- */
+
+/** @brief GET /api/fleet/hosts — dynamic Zigbee host registry snapshot. */
+static esp_err_t api_fleet_hosts_get(httpd_req_t *req)
+{
+    fleet_registry_snapshot_t snap;
+    if (!host_registry_snapshot(&snap)) {
+        return send_error_json(req, HTTPD_500, "snapshot_failed", "registry unavailable");
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "host_count", snap.host_count);
+    cJSON_AddNumberToObject(root, "joined_count", (double)snap.joined_count);
+    cJSON *hosts = cJSON_AddArrayToObject(root, "hosts");
+    for (uint8_t i = 0; i < snap.host_count; i++) {
+        const fleet_registry_host_t *h = &snap.hosts[i];
+        cJSON *hj = cJSON_CreateObject();
+        cJSON_AddStringToObject(hj, "device_id", h->device_id);
+        cJSON_AddStringToObject(hj, "host_type", h->host_type);
+        cJSON_AddNumberToObject(hj, "host_type_id", h->host_type_id);
+        cJSON_AddNumberToObject(hj, "short_addr", h->short_addr);
+        cJSON_AddBoolToObject(hj, "link_ok", h->link_ok);
+        cJSON_AddNumberToObject(hj, "last_seen_ms", (double)h->last_seen_ms);
+        cJSON *readings = cJSON_AddArrayToObject(hj, "readings");
+        for (uint8_t r = 0; r < h->reading_count; r++) {
+            cJSON *rj = cJSON_CreateObject();
+            cJSON_AddStringToObject(rj, "key", h->readings[r].key);
+            cJSON_AddNumberToObject(rj, "value", h->readings[r].value);
+            cJSON_AddStringToObject(rj, "unit", h->readings[r].unit);
+            cJSON_AddBoolToObject(rj, "valid", h->readings[r].valid);
+            cJSON_AddItemToArray(readings, rj);
+        }
+        cJSON_AddItemToArray(hosts, hj);
+    }
+    return send_ok_json(req, root);
+}
+
+/* ---- GET /api/fleet/zigbee ------------------------------------------------ */
+
+static esp_err_t api_fleet_zigbee_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+#ifdef CONFIG_FLEET_ZIGBEE_ENABLE
+    cJSON_AddBoolToObject(root, "enabled", true);
+    cJSON_AddNumberToObject(root, "channel", CONFIG_FLEET_ZIGBEE_CHANNEL);
+#else
+    cJSON_AddBoolToObject(root, "enabled", false);
+    cJSON_AddNumberToObject(root, "channel", 0);
+#endif
+    cJSON_AddBoolToObject(root, "running", transport_zigbee_is_running());
+    return send_ok_json(req, root);
+}
+
 /* ---- GET /api/health -------------------------------------------------------- */
 
+/** @brief Map esp_reset_reason_t to a short string. */
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
     switch (r) {
@@ -1179,6 +1278,7 @@ static const char *reset_reason_str(esp_reset_reason_t r)
     }
 }
 
+/** @brief GET /api/health — uptime, heap, reset reason, fw build info. */
 static esp_err_t api_health_get(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
@@ -1201,6 +1301,7 @@ static esp_err_t api_health_get(httpd_req_t *req)
 
 /* ---- GET / ----------------------------------------------------------------------- */
 
+/** @brief GET / — SoftAP Fleet-C6 HTML UI (stats/config). */
 static esp_err_t root_get(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "GET /");
@@ -1210,6 +1311,7 @@ static esp_err_t root_get(httpd_req_t *req)
 
 /* ---- registration ------------------------------------------------------------------ */
 
+/** @brief Register all /api REST handlers + `/` UI; start telemetry cache. */
 esp_err_t http_api_register(httpd_handle_t server)
 {
     esp_err_t err = telemetry_cache_start();
@@ -1243,6 +1345,8 @@ esp_err_t http_api_register(httpd_handle_t server)
         {.uri = "/api/ota/lte", .method = HTTP_GET, .handler = api_ota_lte_handler},
         {.uri = "/api/ota/lte", .method = HTTP_POST, .handler = api_ota_lte_handler},
         {.uri = "/api/ota/lte/run", .method = HTTP_POST, .handler = api_ota_lte_run_post},
+        {.uri = "/api/fleet/hosts", .method = HTTP_GET, .handler = api_fleet_hosts_get},
+        {.uri = "/api/fleet/zigbee", .method = HTTP_GET, .handler = api_fleet_zigbee_get},
         {.uri = "/", .method = HTTP_GET, .handler = root_get},
     };
 

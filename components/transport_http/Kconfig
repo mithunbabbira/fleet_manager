@@ -1,0 +1,10 @@
+menu "Fleet HTTP (SoftAP + web UI)"
+
+    config ELM_HTTP_ENABLE
+        bool "Enable SoftAP and embedded HTTP API"
+        default n
+        help
+            When disabled, use USB serial and the PC Carrier Console instead.
+            Saves flash and avoids Wi-Fi airtime alongside Zigbee.
+
+endmenu

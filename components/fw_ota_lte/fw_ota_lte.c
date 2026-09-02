@@ -2,6 +2,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -33,16 +34,22 @@ static const char *TAG = "fw_ota_lte";
  * - ota_chan:  retained for NVS/UI compatibility (not appended to URL)
  * - ota_force: if true, reflash even when version matches
  * - uplink_did: uplink/device_id; kept in sync with OTA "device_id"
- * - ota_applied: last successfully applied latestVersion (prevents lab label-bumps
- *                 from causing infinite redownload loops)
+ * - ota_applied: last successfully applied latestVersion (promoted only after
+ *                 boot verify — prevents lab label-bumps / rollback retry blocks)
+ * - ota_pend:    latestVersion written just before reboot; promoted on confirm
  */
 #define NVS_KEY_URL "ota_manif"
 #define NVS_KEY_CHAN "ota_chan"
 #define NVS_KEY_FORCE "ota_force"
 #define NVS_KEY_DID "uplink_did"
 #define NVS_KEY_APPLIED "ota_applied"
+#define NVS_KEY_PENDING "ota_pend"
 
 #define CHECK_RESP_BUF_LEN 4096
+
+/* Presigned S3 GET can fail transiently (UART glitch, brief LTE stall). */
+#define FW_OTA_LTE_STREAM_ATTEMPTS 3
+#define FW_OTA_LTE_STREAM_RETRY_MS 3000
 
 #ifndef CONFIG_FW_OTA_LTE_CHECK_URL
 #define CONFIG_FW_OTA_LTE_CHECK_URL ""
@@ -75,6 +82,7 @@ static char s_applied[40];
 
 static esp_err_t save_nvs(const fw_ota_lte_config_t *c);
 
+/** @brief Update phase/error under caller-held s_mu. */
 static void set_phase(fw_ota_lte_phase_t p, const char *err)
 {
     s_st.phase = p;
@@ -85,6 +93,7 @@ static void set_phase(fw_ota_lte_phase_t p, const char *err)
     }
 }
 
+/** @brief Fill empty manifest_url from Kconfig CHECK_URL. */
 static void apply_default_url(fw_ota_lte_config_t *c)
 {
     if (c->manifest_url[0] != '\0') {
@@ -96,7 +105,7 @@ static void apply_default_url(fw_ota_lte_config_t *c)
     }
 }
 
-/* Old lab GET / ngrok saved in NVS ota_manif — must not override Trafyn. */
+/** @brief Detect legacy ngrok / /firmware/manifest check URLs. */
 static bool check_url_is_legacy_lab(const char *url)
 {
     if (url == NULL || url[0] == '\0') {
@@ -111,6 +120,7 @@ static bool check_url_is_legacy_lab(const char *url)
     return false;
 }
 
+/** @brief Replace legacy URL with Kconfig default; return true if rewritten. */
 static bool sanitize_check_url(fw_ota_lte_config_t *c)
 {
     if (!check_url_is_legacy_lab(c->manifest_url)) {
@@ -123,16 +133,17 @@ static bool sanitize_check_url(fw_ota_lte_config_t *c)
     return true;
 }
 
+/** @brief Zero config; device_id must be provisioned via Carrier Console. */
 static void defaults(fw_ota_lte_config_t *c)
 {
     memset(c, 0, sizeof(*c));
     snprintf(c->channel, sizeof(c->channel), "%s", "stable");
-    snprintf(c->device_id, sizeof(c->device_id), "%s", "fleet-demo-001");
     c->force = false;
     c->manifest_url[0] = '\0';
     apply_default_url(c);
 }
 
+/** @brief Load NVS into s_cfg/s_applied; may rewrite legacy URL. */
 static esp_err_t load_nvs(void)
 {
     defaults(&s_cfg);
@@ -160,15 +171,19 @@ static esp_err_t load_nvs(void)
     if (s_cfg.channel[0] == '\0') {
         snprintf(s_cfg.channel, sizeof(s_cfg.channel), "%s", "stable");
     }
-    if (s_cfg.device_id[0] == '\0') {
-        snprintf(s_cfg.device_id, sizeof(s_cfg.device_id), "%s", "fleet-demo-001");
-    }
     if (replaced) {
         (void)save_nvs(&s_cfg);
     }
     return ESP_OK;
 }
 
+/**
+ * @brief Persist ota_applied + RAM s_applied.
+ * @warning Call only after successful boot verify (today called pre-reboot — B1).
+ */
+/**
+ * @brief Persist ota_applied + RAM s_applied (only after boot verify).
+ */
 static esp_err_t save_applied_version(const char *version)
 {
     if (!version || !version[0]) {
@@ -190,6 +205,47 @@ static esp_err_t save_applied_version(const char *version)
     return err;
 }
 
+/**
+ * @brief Store Trafyn latestVersion as ota_pend before reboot (not yet applied).
+ */
+static esp_err_t save_pending_version(const char *version)
+{
+    if (!version || !version[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, NVS_KEY_PENDING, version);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+/** @brief Erase ota_pend (rollback or failed end_and_reboot). */
+static esp_err_t clear_pending_version(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_erase_key(h, NVS_KEY_PENDING);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+/** @brief Persist URL/channel/force/device_id (uplink_did). */
 static esp_err_t save_nvs(const fw_ota_lte_config_t *c)
 {
     nvs_handle_t h;
@@ -224,6 +280,19 @@ esp_err_t fw_ota_lte_init(void)
         }
     }
     load_nvs();
+    /*
+     * Drop orphaned ota_pend when this boot is not pending verify (rollback or
+     * leftover). If we ARE pending verify, keep pend for commit after SoftAP.
+     */
+    {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t img_state = ESP_OTA_IMG_UNDEFINED;
+        if (running &&
+            esp_ota_get_state_partition(running, &img_state) == ESP_OK &&
+            img_state != ESP_OTA_IMG_PENDING_VERIFY) {
+            (void)clear_pending_version();
+        }
+    }
     memset(&s_st, 0, sizeof(s_st));
     set_phase(FW_OTA_LTE_IDLE, NULL);
     ESP_LOGI(TAG, "init url='%s' channel='%s' force=%d", s_cfg.manifest_url, s_cfg.channel,
@@ -270,6 +339,7 @@ esp_err_t fw_ota_lte_get_status(fw_ota_lte_status_t *out)
     return ESP_OK;
 }
 
+/** @brief Stream chunk → fw_ota_write; bump bytes_downloaded under mutex. */
 static esp_err_t stream_write_cb(const uint8_t *data, size_t len, void *ctx)
 {
     (void)ctx;
@@ -298,6 +368,12 @@ esp_err_t fw_ota_lte_run(void)
     if (cfg.manifest_url[0] == '\0') {
         xSemaphoreTake(s_mu, portMAX_DELAY);
         set_phase(FW_OTA_LTE_FAILED, "check_url empty");
+        xSemaphoreGive(s_mu);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (cfg.device_id[0] == '\0') {
+        xSemaphoreTake(s_mu, portMAX_DELAY);
+        set_phase(FW_OTA_LTE_FAILED, "device_id not provisioned");
         xSemaphoreGive(s_mu);
         return ESP_ERR_INVALID_STATE;
     }
@@ -334,7 +410,7 @@ esp_err_t fw_ota_lte_run(void)
         xSemaphoreGive(s_mu);
         return ESP_ERR_NO_MEM;
     }
-    cJSON_AddStringToObject(input, "deviceId", cfg.device_id[0] ? cfg.device_id : "fleet-demo-001");
+    cJSON_AddStringToObject(input, "deviceId", cfg.device_id);
     cJSON_AddStringToObject(input, "manufacturer", CONFIG_FW_OTA_LTE_MANUFACTURER);
     cJSON_AddStringToObject(input, "deviceType", CONFIG_FW_OTA_LTE_DEVICE_TYPE);
     cJSON_AddStringToObject(input, "currentVersion", stripped[0] ? stripped : "0.0.0");
@@ -431,46 +507,63 @@ esp_err_t fw_ota_lte_run(void)
     set_phase(FW_OTA_LTE_DOWNLOADING, NULL);
     xSemaphoreGive(s_mu);
 
-    err = fw_ota_begin(parsed.size, parsed.sha256);
-    if (err != ESP_OK) {
-        fw_ota_status_t ost;
-        fw_ota_get_status(&ost);
+    /*
+     * Stream the binary into fw_ota_write() (no full-.bin RAM buffer).
+     * Retry a few times on stream/read fail so trucks recover without SoftAP.
+     * GPS background AT is paused by lte_ota_task for this whole worker.
+     */
+    err = ESP_FAIL;
+    for (int attempt = 1; attempt <= FW_OTA_LTE_STREAM_ATTEMPTS; ++attempt) {
+        err = fw_ota_begin(parsed.size, parsed.sha256);
+        if (err != ESP_OK) {
+            fw_ota_status_t ost;
+            fw_ota_get_status(&ost);
+            xSemaphoreTake(s_mu, portMAX_DELAY);
+            set_phase(FW_OTA_LTE_FAILED, ost.error[0] ? ost.error : "fw_ota_begin");
+            xSemaphoreGive(s_mu);
+            return err;
+        }
+
+        size_t clen = 0;
+        memset(&hr, 0, sizeof(hr));
+        ESP_LOGI(TAG, "bin stream attempt %d/%d", attempt, FW_OTA_LTE_STREAM_ATTEMPTS);
+        err = net_lte_http_get_stream(parsed.presigned_url, stream_write_cb, NULL, &clen, &hr);
         xSemaphoreTake(s_mu, portMAX_DELAY);
-        set_phase(FW_OTA_LTE_FAILED, ost.error[0] ? ost.error : "fw_ota_begin");
+        s_st.http_status = hr.http_status;
         xSemaphoreGive(s_mu);
-        return err;
+
+        if (err == ESP_OK) {
+            break;
+        }
+
+        ESP_LOGW(TAG, "bin stream fail attempt %d/%d: %s", attempt, FW_OTA_LTE_STREAM_ATTEMPTS,
+                 hr.error[0] ? hr.error : esp_err_to_name(err));
+        fw_ota_abort();
+        if (attempt < FW_OTA_LTE_STREAM_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(FW_OTA_LTE_STREAM_RETRY_MS));
+        }
     }
 
-    size_t clen = 0;
-    memset(&hr, 0, sizeof(hr));
-    /*
-     * Stream the binary and immediately forward each chunk into fw_ota_write().
-     * This avoids buffering the full .bin in RAM. Presigned URL TTL is short.
-     */
-    err = net_lte_http_get_stream(parsed.presigned_url, stream_write_cb, NULL, &clen, &hr);
-    xSemaphoreTake(s_mu, portMAX_DELAY);
-    s_st.http_status = hr.http_status;
-    xSemaphoreGive(s_mu);
-
-    char applied_ver[40];
-    snprintf(applied_ver, sizeof(applied_ver), "%s", parsed.latest_version);
+    char pending_ver[40];
+    snprintf(pending_ver, sizeof(pending_ver), "%s", parsed.latest_version);
 
     if (err != ESP_OK) {
-        fw_ota_abort();
         xSemaphoreTake(s_mu, portMAX_DELAY);
         set_phase(FW_OTA_LTE_FAILED, hr.error[0] ? hr.error : "bin_download_fail");
         xSemaphoreGive(s_mu);
         return err;
     }
 
-    (void)save_applied_version(applied_ver);
+    /* Persist as pending only — promote to ota_applied after boot verify (B1). */
+    (void)save_pending_version(pending_ver);
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
     set_phase(FW_OTA_LTE_REBOOTING, NULL);
     xSemaphoreGive(s_mu);
 
     err = fw_ota_end_and_reboot();
-    /* only on failure */
+    /* only on failure — drop pending so a rollback can redownload */
+    (void)clear_pending_version();
     fw_ota_abort();
     xSemaphoreTake(s_mu, portMAX_DELAY);
     set_phase(FW_OTA_LTE_FAILED, "end_reboot_fail");
@@ -478,10 +571,14 @@ esp_err_t fw_ota_lte_run(void)
     return err;
 }
 
+/** @brief Worker: suspend BG AT, fw_ota_lte_run, resume, clear s_task. */
 static void lte_ota_task(void *arg)
 {
     (void)arg;
+    /* Also cover firmware-check POST: no GPS AT while OTA worker runs. */
+    net_lte_suspend_bg_at(true);
     fw_ota_lte_run();
+    net_lte_suspend_bg_at(false);
     s_task = NULL;
     vTaskDelete(NULL);
 }
@@ -511,8 +608,34 @@ bool fw_ota_lte_is_busy(void)
            st.phase == FW_OTA_LTE_REBOOTING || s_task != NULL;
 }
 
+esp_err_t fw_ota_lte_commit_pending_applied(void)
+{
+    char pending[40];
+    pending[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return ESP_OK;
+    }
+    size_t len = sizeof(pending);
+    (void)nvs_get_str(h, NVS_KEY_PENDING, pending, &len);
+    nvs_close(h);
+    if (pending[0] == '\0') {
+        return ESP_OK;
+    }
+
+    esp_err_t err = save_applied_version(pending);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "commit pending→applied failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    (void)clear_pending_version();
+    ESP_LOGI(TAG, "committed ota_applied='%s' after boot verify", pending);
+    return ESP_OK;
+}
+
 #if CONFIG_FW_OTA_LTE_AUTO_CHECK
 
+/** @brief Poll net_lte_refresh until registered or timeout. */
 static bool wait_lte_registered(int max_sec)
 {
     for (int i = 0; i < max_sec; i++) {
@@ -528,6 +651,9 @@ static bool wait_lte_registered(int max_sec)
     return false;
 }
 
+/**
+ * @brief Ensure URL; if force set, clear and persist (see O2 — prefer local-only clear).
+ */
 static void ensure_auto_config(void)
 {
     fw_ota_lte_config_t cfg;
@@ -549,12 +675,17 @@ static void ensure_auto_config(void)
     }
 }
 
+/** @brief One auto cycle: start_background and wait until not busy. */
 static void auto_check_once(void)
 {
     ensure_auto_config();
     fw_ota_lte_config_t cfg;
     if (fw_ota_lte_get_config(&cfg) != ESP_OK || cfg.manifest_url[0] == '\0') {
         ESP_LOGW(TAG, "auto: no check URL — skip");
+        return;
+    }
+    if (cfg.device_id[0] == '\0') {
+        ESP_LOGW(TAG, "auto: device_id not provisioned — skip");
         return;
     }
     if (fw_ota_lte_is_busy() || fw_ota_is_busy()) {
@@ -573,6 +704,7 @@ static void auto_check_once(void)
     }
 }
 
+/** @brief Infinite auto-check loop with interval sleep. */
 static void lte_ota_auto_task(void *arg)
 {
     (void)arg;

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "host_type": "ul212_ble_fetch",
+  "host_type_id": 1,
+  "description": "Tenet UL212 fuel level over BLE",
+  "zigbee": {
+    "device_role": "end_device",
+    "report_interval_ms": 1000,
+    "max_airtime_bytes": 64
+  },
+  "required_header": ["device_id", "host_type_id", "seq", "ts_ms", "status"],
+  "readings": [
+    { "key": "height_mm", "tlv_id": 16, "type": "float", "unit": "mm", "required": true },
+    { "key": "smooth_mm", "tlv_id": 17, "type": "float", "unit": "mm" },
+    { "key": "temperature_c", "tlv_id": 18, "type": "float", "unit": "C" },
+    { "key": "signal", "tlv_id": 19, "type": "uint8" },
+    { "key": "valid_echo", "tlv_id": 20, "type": "uint8" },
+    { "key": "tilt_deg", "tlv_id": 21, "type": "uint8" }
+  ]
+}

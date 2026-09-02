@@ -19,8 +19,7 @@ extern "C" {
 
 #define OBD_ISOTP_MAX_PAYLOAD 64
 
-/* Build a padded 8-byte single-frame from a hex command string ("010C",
- * "0902", "03"). Returns 0 on success, -1 on bad input or payload > 7. */
+/** @brief Build padded 8-byte SF from hex cmd (max 7 data bytes). */
 int obd_isotp_build_sf(const char *cmd_hex, uint8_t out[8]);
 
 typedef enum {
@@ -42,17 +41,16 @@ typedef struct {
 
 void obd_isotp_rx_reset(obd_isotp_rx_t *rx);
 
-/* Feed one received CAN frame (data + dlc, with its CAN id).
- * When a multi-frame transfer is in progress, frames from other ids are
- * ignored. Returns the resulting status. */
+/**
+ * @brief Feed one CAN frame: SF complete / FF→NEED_FC / CF assemble.
+ * @note Payloads >64 ignored (no Overflow FC); fine for typical OBD.
+ */
 obd_isotp_rx_status_t obd_isotp_rx_feed(obd_isotp_rx_t *rx, uint32_t can_id,
                                         const uint8_t *data, uint8_t dlc);
 
-/* After OBD_ISOTP_RX_COMPLETE: write payload as uppercase hex ("410C0C30").
- * Returns chars written (excl. NUL) or -1 if out is too small. */
 int obd_isotp_payload_hex(const obd_isotp_rx_t *rx, char *out, size_t out_len);
 
-/* Fill a padded 8-byte flow-control frame (ClearToSend, no block limit). */
+/** @brief CTS FC, BS=0, STmin=0. */
 void obd_isotp_build_fc(uint8_t out[8]);
 
 #ifdef __cplusplus

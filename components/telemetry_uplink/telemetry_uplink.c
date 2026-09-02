@@ -41,6 +41,8 @@ static const char *TAG = "uplink";
 #define NVS_KEY_IV "uplink_iv"   /* produce interval seconds */
 #define NVS_KEY_DID "uplink_did" /* Trafyn/deviceId (shared with fw_ota_lte) */
 #define NVS_KEY_NID "uplink_nid" /* node_id in payload */
+#define NVS_KEY_POST_URL "uplink_url"
+#define NVS_KEY_SCHEMA "uplink_schema"
 
 #define UPLINK_TASK_STACK 8192
 #define UPLINK_DRAIN_STACK 8192
@@ -59,6 +61,8 @@ static const char *TAG = "uplink";
 #endif
 
 static telemetry_uplink_config_t s_cfg;
+static char s_post_url[256];
+static char s_schema_id[16];
 static telemetry_uplink_last_t s_last;
 static char s_drain_err[80];
 static SemaphoreHandle_t s_mu;
@@ -79,11 +83,15 @@ static telemetry_pid_sample_t s_throttle;
 static telemetry_pid_sample_t s_voltage;
 static bool s_have_rpm, s_have_speed, s_have_coolant, s_have_throttle, s_have_voltage;
 
+static uplink_host_report_t s_hosts[UPLINK_MAX_HOSTS];
+static uint8_t s_host_count;
+
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
 }
 
+/** @brief Update GPS-only dedup last lat/lng/time when snap has fix. */
 static void remember_gps_if_ok(const uplink_snapshot_t *snap)
 {
     if (!snap->gps_ok) {
@@ -95,6 +103,7 @@ static void remember_gps_if_ok(const uplink_snapshot_t *snap)
     s_last_gps_ms = snap->ts_ms;
 }
 
+/** @brief Record last produce/drain diagnostic (SoftAP/serial). */
 static void set_last(bool ok, bool skipped, int http_status, const char *reason,
                      const char *error)
 {
@@ -114,15 +123,38 @@ static void set_drain_err(const char *msg)
 static void cfg_defaults(telemetry_uplink_config_t *c)
 {
     memset(c, 0, sizeof(*c));
-    c->enabled = true;
-    c->interval_s = 5;
-    snprintf(c->device_id, sizeof(c->device_id), "%s", "fleet-demo-001");
-    snprintf(c->node_id, sizeof(c->node_id), "%s", "esp32c6-01");
+    c->enabled = false;
+    c->interval_s = 60;
+    /* device_id / node_id intentionally empty until Carrier Console provision. */
+}
+
+static void endpoint_defaults(void)
+{
+    snprintf(s_post_url, sizeof(s_post_url), "%s", UPLINK_URL);
+    snprintf(s_schema_id, sizeof(s_schema_id), "%s", UPLINK_SCHEMA_ID);
+}
+
+static bool cfg_is_provisioned(const telemetry_uplink_config_t *c)
+{
+    return c != NULL && c->device_id[0] != '\0' && c->node_id[0] != '\0';
+}
+
+bool telemetry_uplink_is_provisioned(void)
+{
+    bool ok;
+    if (s_mu != NULL && xSemaphoreTake(s_mu, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        ok = cfg_is_provisioned(&s_cfg);
+        xSemaphoreGive(s_mu);
+    } else {
+        ok = cfg_is_provisioned(&s_cfg);
+    }
+    return ok;
 }
 
 static esp_err_t cfg_load(void)
 {
     cfg_defaults(&s_cfg);
+    endpoint_defaults();
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
     if (err != ESP_OK) {
@@ -132,7 +164,7 @@ static esp_err_t cfg_load(void)
     if (nvs_get_u8(h, NVS_KEY_EN, &en) == ESP_OK) {
         s_cfg.enabled = en != 0;
     }
-    uint16_t iv = 5;
+    uint16_t iv = 60;
     if (nvs_get_u16(h, NVS_KEY_IV, &iv) == ESP_OK) {
         if (iv < 1) {
             iv = 1;
@@ -146,7 +178,18 @@ static esp_err_t cfg_load(void)
     nvs_get_str(h, NVS_KEY_DID, s_cfg.device_id, &len);
     len = sizeof(s_cfg.node_id);
     nvs_get_str(h, NVS_KEY_NID, s_cfg.node_id, &len);
+    len = sizeof(s_post_url);
+    if (nvs_get_str(h, NVS_KEY_POST_URL, s_post_url, &len) != ESP_OK || s_post_url[0] == '\0') {
+        endpoint_defaults();
+    }
+    len = sizeof(s_schema_id);
+    if (nvs_get_str(h, NVS_KEY_SCHEMA, s_schema_id, &len) != ESP_OK || s_schema_id[0] == '\0') {
+        snprintf(s_schema_id, sizeof(s_schema_id), "%s", UPLINK_SCHEMA_ID);
+    }
     nvs_close(h);
+    if (!cfg_is_provisioned(&s_cfg)) {
+        s_cfg.enabled = false;
+    }
     return ESP_OK;
 }
 
@@ -174,6 +217,82 @@ static esp_err_t cfg_save(const telemetry_uplink_config_t *c)
     return err;
 }
 
+static esp_err_t endpoint_save_url(const char *url)
+{
+    if (url == NULL || url[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, NVS_KEY_POST_URL, url);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        snprintf(s_post_url, sizeof(s_post_url), "%s", url);
+    }
+    return err;
+}
+
+static esp_err_t endpoint_save_schema(const char *schema)
+{
+    if (schema == NULL || schema[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, NVS_KEY_SCHEMA, schema);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        snprintf(s_schema_id, sizeof(s_schema_id), "%s", schema);
+    }
+    return err;
+}
+
+esp_err_t telemetry_uplink_provision(const char *device_id, const char *node_id)
+{
+    if (device_id == NULL || device_id[0] == '\0' || node_id == NULL || node_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    telemetry_uplink_config_t c;
+    if (telemetry_uplink_get_config(&c) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    snprintf(c.device_id, sizeof(c.device_id), "%s", device_id);
+    snprintf(c.node_id, sizeof(c.node_id), "%s", node_id);
+    esp_err_t err = telemetry_uplink_set_config(&c);
+    if (err != ESP_OK) {
+        return err;
+    }
+    fw_ota_lte_config_t ota;
+    if (fw_ota_lte_get_config(&ota) == ESP_OK) {
+        snprintf(ota.device_id, sizeof(ota.device_id), "%s", device_id);
+        (void)fw_ota_lte_set_config(&ota);
+    }
+    return ESP_OK;
+}
+
+esp_err_t telemetry_uplink_set_post_url(const char *url)
+{
+    return endpoint_save_url(url);
+}
+
+esp_err_t telemetry_uplink_set_schema_id(const char *schema_id)
+{
+    return endpoint_save_schema(schema_id);
+}
+
+/** @brief Cache rpm/speed/coolant/throttle/voltage samples from bus. */
 static void store_sample(const telemetry_pid_sample_t *s)
 {
     if (s == NULL || s->name[0] == '\0') {
@@ -197,6 +316,52 @@ static void store_sample(const telemetry_pid_sample_t *s)
     }
 }
 
+static void store_host_report(const telemetry_host_report_t *rep)
+{
+    if (rep == NULL || rep->device_id[0] == '\0') {
+        return;
+    }
+    for (uint8_t i = 0; i < s_host_count; i++) {
+        if (strcmp(s_hosts[i].device_id, rep->device_id) == 0) {
+            s_hosts[i].host_type_id = rep->host_type_id;
+            snprintf(s_hosts[i].host_type, sizeof(s_hosts[i].host_type), "%s", rep->host_type);
+            s_hosts[i].ts_ms = rep->ts_ms;
+            s_hosts[i].reading_count = rep->reading_count;
+            if (s_hosts[i].reading_count > UPLINK_MAX_HOST_READINGS) {
+                s_hosts[i].reading_count = UPLINK_MAX_HOST_READINGS;
+            }
+            for (uint8_t r = 0; r < s_hosts[i].reading_count; r++) {
+                snprintf(s_hosts[i].readings[r].key, sizeof(s_hosts[i].readings[r].key), "%s",
+                         rep->readings[r].key);
+                snprintf(s_hosts[i].readings[r].unit, sizeof(s_hosts[i].readings[r].unit), "%s",
+                         rep->readings[r].unit);
+                s_hosts[i].readings[r].value = rep->readings[r].value;
+                s_hosts[i].readings[r].valid = rep->readings[r].valid;
+            }
+            return;
+        }
+    }
+    if (s_host_count >= UPLINK_MAX_HOSTS) {
+        return;
+    }
+    uplink_host_report_t *h = &s_hosts[s_host_count++];
+    memset(h, 0, sizeof(*h));
+    snprintf(h->device_id, sizeof(h->device_id), "%s", rep->device_id);
+    snprintf(h->host_type, sizeof(h->host_type), "%s", rep->host_type);
+    h->host_type_id = rep->host_type_id;
+    h->ts_ms = rep->ts_ms;
+    h->reading_count = rep->reading_count;
+    if (h->reading_count > UPLINK_MAX_HOST_READINGS) {
+        h->reading_count = UPLINK_MAX_HOST_READINGS;
+    }
+    for (uint8_t r = 0; r < h->reading_count; r++) {
+        snprintf(h->readings[r].key, sizeof(h->readings[r].key), "%s", rep->readings[r].key);
+        snprintf(h->readings[r].unit, sizeof(h->readings[r].unit), "%s", rep->readings[r].unit);
+        h->readings[r].value = rep->readings[r].value;
+        h->readings[r].valid = rep->readings[r].valid;
+    }
+}
+
 static void cache_task(void *arg)
 {
     (void)arg;
@@ -205,13 +370,15 @@ static void cache_task(void *arg)
         if (xQueueReceive(s_q, &msg, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        if (msg.type != TELEMETRY_PID_SAMPLE) {
+        if (xSemaphoreTake(s_mu, pdMS_TO_TICKS(200)) != pdTRUE) {
             continue;
         }
-        if (xSemaphoreTake(s_mu, pdMS_TO_TICKS(200)) == pdTRUE) {
+        if (msg.type == TELEMETRY_PID_SAMPLE) {
             store_sample(&msg.pid_sample);
-            xSemaphoreGive(s_mu);
+        } else if (msg.type == TELEMETRY_HOST_REPORT) {
+            store_host_report(&msg.host_report);
         }
+        xSemaphoreGive(s_mu);
     }
 }
 
@@ -229,6 +396,7 @@ static void fill_pid_view(uplink_pid_view_t *v, bool have, const telemetry_pid_s
     v->age_ms = (now >= s->ts_ms) ? (uint32_t)(now - s->ts_ms) : 0;
 }
 
+/** @brief Any PID fresh within UPLINK_PID_FRESH_MS (caller holds s_mu). */
 static bool any_fresh_ok_locked(uint64_t now)
 {
     uplink_pid_view_t v;
@@ -265,6 +433,7 @@ static bool any_fresh_ok_locked(uint64_t now)
     return false;
 }
 
+/** @brief Snapshot: cached PIDs + GNSS cache + ids/metrics. */
 static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config_t *cfg_out,
                                 bool *have_fresh_out)
 {
@@ -283,6 +452,13 @@ static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config
     fill_pid_view(&snap->coolant, s_have_coolant, &s_coolant, now);
     fill_pid_view(&snap->throttle, s_have_throttle, &s_throttle, now);
     fill_pid_view(&snap->voltage, s_have_voltage, &s_voltage, now);
+    snap->host_count = s_host_count;
+    if (snap->host_count > UPLINK_MAX_HOSTS) {
+        snap->host_count = UPLINK_MAX_HOSTS;
+    }
+    for (uint8_t i = 0; i < snap->host_count; i++) {
+        snap->hosts[i] = s_hosts[i];
+    }
     xSemaphoreGive(s_mu);
 
     obd_profile_t profile;
@@ -312,7 +488,11 @@ static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config
     return ESP_OK;
 }
 
-/** Producer: build snapshot → enqueue on SD (or live POST if no SD). */
+/**
+ * @brief Produce tick: gates → JSON → SD enqueue or live POST.
+ * @note OTA busy only blocks live modem POST; SD enqueue still runs so samples
+ *       accumulate while LTE OTA holds the UART.
+ */
 static esp_err_t produce_once(void)
 {
     uplink_snapshot_t snap;
@@ -328,8 +508,13 @@ static esp_err_t produce_once(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (!cfg_is_provisioned(&cfg)) {
+        set_last(false, true, 0, "not provisioned", "");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     /* CAN/OBD optional: GPS-only ticks still queue so the truck location is known. */
-    if (!uplink_should_enqueue(have_fresh, snap.gps_ok)) {
+    if (!uplink_should_enqueue(have_fresh, snap.gps_ok) && snap.host_count == 0) {
         set_last(false, true, 0, "no pid or gps", "");
         return ESP_ERR_INVALID_STATE;
     }
@@ -377,7 +562,7 @@ static esp_err_t produce_once(void)
      * Body is one object: {"schemaId":"1087","payload":{...}} (see uplink_payload_build).
      */
     static char json[EVENT_BUF_LEN + 64];
-    int n = uplink_payload_build(&snap, json, sizeof(json));
+    int n = uplink_payload_build(&snap, s_schema_id, json, sizeof(json));
     if (n < 0) {
         set_last(false, true, 0, "json build fail", "");
         return ESP_FAIL;
@@ -387,7 +572,7 @@ static esp_err_t produce_once(void)
         return ESP_ERR_INVALID_STATE;
     }
     net_lte_http_result_t http;
-    err = net_lte_http_post(UPLINK_URL, json, &http);
+    err = net_lte_http_post(s_post_url, json, &http);
     if (err == ESP_OK) {
         set_last(true, false, http.http_status, "posted", "");
         ESP_LOGI(TAG, "live POST ok status=%d bytes=%d", http.http_status, n);
@@ -399,6 +584,9 @@ static esp_err_t produce_once(void)
     return err;
 }
 
+/**
+ * @brief Peek SD batch, POST array; ack bytes only on HTTP 2xx (400 keeps head).
+ */
 static esp_err_t drain_once(void)
 {
     if (!store_sd_is_mounted()) {
@@ -431,7 +619,7 @@ static esp_err_t drain_once(void)
     size_t use_lines = n_lines;
     size_t use_span = span;
     while (use_lines > 0) {
-        bn = uplink_payload_build_batch(peek, use_lines, batch, sizeof(batch));
+        bn = uplink_payload_build_batch(peek, use_lines, s_schema_id, batch, sizeof(batch));
         if (bn > 0 && (size_t)bn <= (size_t)CONFIG_STORE_SD_BATCH_MAX_BYTES) {
             break;
         }
@@ -457,7 +645,7 @@ static esp_err_t drain_once(void)
      * On HTTP failure keep SD lines (ack only after success) so samples retry.
      */
     net_lte_http_result_t http;
-    err = net_lte_http_post(UPLINK_URL, batch, &http);
+    err = net_lte_http_post(s_post_url, batch, &http);
     if (err == ESP_OK) {
         esp_err_t ack = store_sd_ack_bytes(use_span, use_lines);
         set_drain_err("");
@@ -498,6 +686,7 @@ static void tick_task(void *arg)
     }
 }
 
+/** @brief Wait notify/backoff; skip if OTA busy; drain_once with backoff. */
 static void drain_task(void *arg)
 {
     (void)arg;
@@ -555,7 +744,8 @@ esp_err_t telemetry_uplink_start(void)
     set_last(false, true, 0, "idle", "");
     set_drain_err("");
 
-    esp_err_t err = telemetry_subscribe(&s_q, TELEMETRY_MASK_PID_SAMPLE);
+    esp_err_t err =
+        telemetry_subscribe(&s_q, TELEMETRY_MASK_PID_SAMPLE | TELEMETRY_MASK_HOST_REPORT);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "subscribe failed: %s", esp_err_to_name(err));
         return err;
@@ -577,8 +767,11 @@ esp_err_t telemetry_uplink_start(void)
         ESP_LOGW(TAG, "SD not mounted — live POST fallback only");
     }
     s_started = true;
-    ESP_LOGI(TAG, "started (enabled=%d interval=%us sd=%d)", s_cfg.enabled,
-             s_cfg.interval_s, (int)store_sd_is_mounted());
+    ESP_LOGI(TAG, "started (enabled=%d interval=%us sd=%d provisioned=%d)", s_cfg.enabled,
+             s_cfg.interval_s, (int)store_sd_is_mounted(), (int)cfg_is_provisioned(&s_cfg));
+    if (!cfg_is_provisioned(&s_cfg)) {
+        ESP_LOGW(TAG, "device not provisioned — set device_id + node_id via Carrier Console");
+    }
     return ESP_OK;
 }
 
@@ -610,6 +803,9 @@ esp_err_t telemetry_uplink_set_config(const telemetry_uplink_config_t *in)
     if (c.interval_s > 300) {
         c.interval_s = 300;
     }
+    if (c.enabled && !cfg_is_provisioned(&c)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t err = cfg_save(&c);
     if (err != ESP_OK) {
         return err;
@@ -635,9 +831,8 @@ esp_err_t telemetry_uplink_get_status(telemetry_uplink_status_t *out)
     out->last = s_last;
     snprintf(out->queue.drain_error, sizeof(out->queue.drain_error), "%s", s_drain_err);
     xSemaphoreGive(s_mu);
-    /* Expose compile-time POST target for SoftAP / serial `uplink` diagnostics. */
-    out->url = UPLINK_URL;
-    out->schema_id = UPLINK_SCHEMA_ID;
+    out->url = s_post_url;
+    out->schema_id = s_schema_id;
 
     store_sd_status_t sd;
     memset(&sd, 0, sizeof(sd));
@@ -662,14 +857,21 @@ esp_err_t telemetry_uplink_send_now(void)
 
 esp_err_t telemetry_uplink_queue_test_enqueue(void)
 {
+    if (!telemetry_uplink_is_provisioned()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!store_sd_is_mounted()) {
         return ESP_ERR_INVALID_STATE;
     }
+    telemetry_uplink_config_t cfg;
+    if (telemetry_uplink_get_config(&cfg) != ESP_OK) {
+        return ESP_FAIL;
+    }
     char line[192];
     int n = snprintf(line, sizeof(line),
-                     "{\"payload\":{\"device_id\":\"qtest\",\"node_id\":\"esp32c6\","
+                     "{\"payload\":{\"device_id\":\"%s\",\"node_id\":\"%s\","
                      "\"schema_version\":1,\"source\":\"esp32_obd\"},\"queued_at_ms\":%llu}",
-                     (unsigned long long)now_ms());
+                     cfg.device_id, cfg.node_id, (unsigned long long)now_ms());
     if (n <= 0 || (size_t)n >= sizeof(line)) {
         return ESP_ERR_NO_MEM;
     }

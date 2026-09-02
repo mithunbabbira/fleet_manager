@@ -31,7 +31,11 @@ typedef struct {
 static sys_runtime_metric_t s_metrics[SYS_RUNTIME_MAX_METRICS];
 static portMUX_TYPE s_metrics_lock = portMUX_INITIALIZER_UNLOCKED;
 
-/* Callers must hold s_metrics_lock. */
+/**
+ * @brief Locate an existing metric by name.
+ * @note Callers must hold s_metrics_lock.
+ * @return Pointer into s_metrics, or NULL if not found.
+ */
 static sys_runtime_metric_t *find_metric_locked(const char *name)
 {
     for (int i = 0; i < SYS_RUNTIME_MAX_METRICS; ++i) {
@@ -42,7 +46,11 @@ static sys_runtime_metric_t *find_metric_locked(const char *name)
     return NULL;
 }
 
-/* Callers must hold s_metrics_lock. */
+/**
+ * @brief Find a metric or allocate a free slot (value starts at 0).
+ * @note Callers must hold s_metrics_lock.
+ * @return Metric pointer, or NULL if the table is full.
+ */
 static sys_runtime_metric_t *find_or_create_metric_locked(const char *name)
 {
     sys_runtime_metric_t *m = find_metric_locked(name);
@@ -61,6 +69,9 @@ static sys_runtime_metric_t *find_or_create_metric_locked(const char *name)
     return NULL;
 }
 
+/**
+ * @brief Pre-create the fixed set of fleet counters so snapshots always include them.
+ */
 static void register_known_metrics(void)
 {
     static const char *known[] = {
@@ -74,6 +85,10 @@ static void register_known_metrics(void)
     portEXIT_CRITICAL(&s_metrics_lock);
 }
 
+/**
+ * @brief Low-prio loop: pet TWDT every 1s and publish uptime_s.
+ * @note Survives TWDT add failure with a warning; never returns.
+ */
 static void heartbeat_task(void *arg)
 {
     (void)arg;
@@ -106,6 +121,10 @@ static void heartbeat_task(void *arg)
     }
 }
 
+/**
+ * @brief Init TWDT (or accept already-running), seed metrics, spawn heartbeat.
+ * @return ESP_OK on success; ESP_ERR_NO_MEM if task create fails; else TWDT error.
+ */
 esp_err_t sys_runtime_init(void)
 {
     register_known_metrics();
@@ -135,6 +154,10 @@ esp_err_t sys_runtime_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Atomically bump a named counter (create-on-first-use).
+ * @note No-op if @p name is NULL or metric table is full.
+ */
 void sys_runtime_metric_inc(const char *name)
 {
     if (!name) {
@@ -148,6 +171,10 @@ void sys_runtime_metric_inc(const char *name)
     portEXIT_CRITICAL(&s_metrics_lock);
 }
 
+/**
+ * @brief Atomically read a named counter.
+ * @return Value, or 0 if @p name is NULL / unknown.
+ */
 uint64_t sys_runtime_metric_get(const char *name)
 {
     if (!name) {
@@ -163,6 +190,10 @@ uint64_t sys_runtime_metric_get(const char *name)
     return value;
 }
 
+/**
+ * @brief Snapshot metrics under lock, then format `{ "k":v,... }` without holding it.
+ * @note Truncates and still NUL-terminates if @p len is insufficient.
+ */
 void sys_runtime_metrics_snapshot_json(char *buf, size_t len)
 {
     if (!buf || len == 0) {
@@ -201,6 +232,10 @@ void sys_runtime_metrics_snapshot_json(char *buf, size_t len)
     }
 }
 
+/**
+ * @brief Write a redirect stub so SoftAP clients use GET /api/ota instead.
+ * @return ESP_OK, or ESP_ERR_INVALID_ARG if @p buf is unusable.
+ */
 esp_err_t sys_runtime_ota_stub_status(char *buf, size_t len)
 {
     if (!buf || len == 0) {

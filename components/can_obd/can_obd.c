@@ -54,7 +54,7 @@ static uint64_t now_ms(void)
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
 }
 
-/* Physical (per-ECU) id to send flow control to, from the ECU's response id. */
+/** @brief Map response ID → physical TX ID for ISO-TP FC. */
 static uint32_t fc_dest_id(const obd_protocol_t *p, uint32_t resp_id)
 {
     if (p->ext) {
@@ -65,12 +65,16 @@ static uint32_t fc_dest_id(const obd_protocol_t *p, uint32_t resp_id)
     return resp_id - 8;
 }
 
+/** @brief Soft accept: id matches protocol filter/mask. */
 static bool resp_id_matches(const obd_protocol_t *p, uint32_t id)
 {
     return (id & p->resp_mask) == (p->resp_filter & p->resp_mask);
 }
 
-/* Core request/response, caller must hold s_bus_mutex. */
+/**
+ * @brief Locked SF TX + SF/FF/CF RX; send FC on NEED_FC.
+ * @note Offline: abort after 250 ms, log TEC/REC/EFLG, ESP_FAIL.
+ */
 static esp_err_t transact_locked(const obd_protocol_t *p, const char *cmd,
                                  char *resp, size_t resp_len, uint32_t timeout_ms)
 {
@@ -171,7 +175,7 @@ static int load_protocol_nvs(void)
     return (int)v;
 }
 
-/* Kconfig pin: -1 = auto sweep, otherwise fixed candidate index. */
+/** @brief Kconfig pin index or -1 for auto. */
 static int pinned_protocol(void)
 {
 #if CONFIG_CAN_OBD_PROTO_11_500
@@ -187,7 +191,7 @@ static int pinned_protocol(void)
 #endif
 }
 
-/* Try one candidate: configure + 0100 probe. */
+/** @brief Configure candidate; probe 0100 expect 4100…. */
 static bool probe_candidate(int idx)
 {
     if (apply_protocol(idx) != ESP_OK) {
@@ -206,7 +210,7 @@ static bool probe_candidate(int idx)
     return false;
 }
 
-/* Full detect pass. Returns protocol index or -1. */
+/** @brief Pin → NVS-first → full sweep. */
 static int detect_protocol(void)
 {
     int pinned = pinned_protocol();
@@ -229,6 +233,7 @@ static int detect_protocol(void)
     return -1;
 }
 
+/** @brief Detect when down; backoff; re-detect after consecutive TX fails. */
 static void link_task(void *arg)
 {
     (void)arg;

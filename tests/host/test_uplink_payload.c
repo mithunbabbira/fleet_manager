@@ -27,7 +27,7 @@ int main(void)
     snprintf(snap.rpm.raw, sizeof(snap.rpm.raw), "%s", "410C0C2E");
 
     char buf[2048];
-    int n = uplink_payload_build(&snap, buf, sizeof(buf));
+    int n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"schemaId\":\"1087\"") != NULL);
     assert(strstr(buf, "null") == NULL);            /* schema forbids null */
@@ -51,7 +51,7 @@ int main(void)
     snap.speed.value = 255;
     snap.speed.age_ms = 20000;
     snprintf(snap.speed.raw, sizeof(snap.speed.raw), "%s", "410DFF");
-    n = uplink_payload_build(&snap, buf, sizeof(buf));
+    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"speed_kmh\"") == NULL);
     assert(strstr(buf, "\"speed_ok\":false") != NULL);
@@ -60,7 +60,7 @@ int main(void)
     snap.speed.age_ms = 100;
     snap.speed.value = 0;
     snprintf(snap.speed.raw, sizeof(snap.speed.raw), "%s", "410D00");
-    n = uplink_payload_build(&snap, buf, sizeof(buf));
+    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"speed_kmh\":0") != NULL);
     assert(strstr(buf, "\"speed_ok\":true") != NULL);
@@ -82,7 +82,7 @@ int main(void)
     char blob[4000];
     snprintf(blob, sizeof(blob), "%s\n%s", event, line2);
     char batch[4500];
-    int bn = uplink_payload_build_batch(blob, 2, batch, sizeof(batch));
+    int bn = uplink_payload_build_batch(blob, 2, NULL, batch, sizeof(batch));
     assert(bn > 0);
     assert(batch[0] == '[');
     assert(batch[bn - 1] == ']');
@@ -101,7 +101,7 @@ int main(void)
     snap.gps_ok = true;
     snap.lat = 12.9716;
     snap.lng = 77.5946;
-    n = uplink_payload_build(&snap, buf, sizeof(buf));
+    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"gps_ok\":true") != NULL);
     assert(strstr(buf, "\"lat\":12.9716") != NULL || strstr(buf, "\"lat\":12.971") != NULL);
@@ -115,7 +115,7 @@ int main(void)
     assert(strstr(payload, "\"lat\":") != NULL);
     assert(strstr(payload, "\"lng\":") != NULL);
     assert(uplink_payload_build_queued_event(payload, 1ULL, event, sizeof(event)) > 0);
-    bn = uplink_payload_build_batch(event, 1, batch, sizeof(batch));
+    bn = uplink_payload_build_batch(event, 1, NULL, batch, sizeof(batch));
     assert(bn > 0);
     assert(batch[0] == '[');
     assert(strstr(batch, "\"gps_ok\":true") != NULL);
@@ -124,11 +124,33 @@ int main(void)
     assert(strstr(batch, "\"source\":\"esp32_obd\"") != NULL);
 
     snap.gps_ok = false;
-    n = uplink_payload_build(&snap, buf, sizeof(buf));
+    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"gps_ok\":false") != NULL);
     assert(strstr(buf, "\"lat\":") == NULL);
     assert(strstr(buf, "\"lng\":") == NULL);
+
+    snap.host_count = 1;
+    snprintf(snap.hosts[0].device_id, sizeof(snap.hosts[0].device_id), "%s", "ul212-001");
+    snprintf(snap.hosts[0].host_type, sizeof(snap.hosts[0].host_type), "%s", "ul212_ble_fetch");
+    snap.hosts[0].host_type_id = 1;
+    snap.hosts[0].ts_ms = 1710000001000ULL;
+    snap.hosts[0].reading_count = 2;
+    snprintf(snap.hosts[0].readings[0].key, sizeof(snap.hosts[0].readings[0].key), "%s",
+             "height_mm");
+    snap.hosts[0].readings[0].value = 40.9;
+    snprintf(snap.hosts[0].readings[0].unit, sizeof(snap.hosts[0].readings[0].unit), "%s", "mm");
+    snap.hosts[0].readings[0].valid = true;
+    snprintf(snap.hosts[0].readings[1].key, sizeof(snap.hosts[0].readings[1].key), "%s",
+             "signal");
+    snap.hosts[0].readings[1].value = 85;
+    snprintf(snap.hosts[0].readings[1].unit, sizeof(snap.hosts[0].readings[1].unit), "%s", "");
+    snap.hosts[0].readings[1].valid = true;
+    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"hosts\":[") != NULL);
+    assert(strstr(buf, "\"height_mm\"") != NULL);
+    assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
 
     assert(uplink_should_enqueue(true, false) == true);
     assert(uplink_should_enqueue(false, true) == true);

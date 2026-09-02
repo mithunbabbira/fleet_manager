@@ -50,11 +50,13 @@ static volatile bool s_poll_enabled;
 static uint32_t s_bus_fail_backoff_ms;
 static uint64_t s_bus_fail_until_ms;
 
+/** @brief Monotonic time in milliseconds. */
 static uint64_t now_ms(void)
 {
     return (uint64_t)(esp_timer_get_time() / 1000);
 }
 
+/** @brief Publish TELEMETRY_ERROR for a policy-blocked command. */
 static void publish_cmd_blocked(const char *cmd, cmd_policy_result_t policy)
 {
     telemetry_msg_t msg;
@@ -70,6 +72,7 @@ static void publish_cmd_blocked(const char *cmd, cmd_policy_result_t policy)
     telemetry_publish(&msg);
 }
 
+/** @brief Publish TELEMETRY_ERROR for can_obd timeout / no-data / bus fail. */
 static void publish_elm_error(const char *cmd, esp_err_t err)
 {
     telemetry_msg_t msg;
@@ -99,6 +102,7 @@ static void publish_elm_error(const char *cmd, esp_err_t err)
     telemetry_publish(&msg);
 }
 
+/** @brief Decode named PID and publish TELEMETRY_PID_SAMPLE. */
 static void publish_pid_sample(const char *cmd, const char *decode_key,
                                const char *resp, bool decode_ok)
 {
@@ -133,6 +137,7 @@ static void publish_pid_sample(const char *cmd, const char *decode_key,
     telemetry_publish(&msg);
 }
 
+/** @brief Parse VIN and publish as TELEMETRY_PID_SAMPLE (name=vin). */
 static void publish_vin_sample(const char *cmd, const char *resp, bool parse_ok)
 {
     telemetry_msg_t msg;
@@ -159,6 +164,7 @@ static void publish_vin_sample(const char *cmd, const char *resp, bool parse_ok)
     telemetry_publish(&msg);
 }
 
+/** @brief Parse DTCs and publish TELEMETRY_DTC_LIST (source Mode 03). */
 static void publish_dtc_list(const char *resp)
 {
     telemetry_msg_t msg;
@@ -172,6 +178,7 @@ static void publish_dtc_list(const char *resp)
     telemetry_publish(&msg);
 }
 
+/** @brief cmd_policy_check then can_obd_transact; metrics + error publish. */
 static esp_err_t run_policy_and_transact(const char *cmd, char *resp, size_t resp_len,
                                          uint32_t timeout_ms)
 {
@@ -202,6 +209,7 @@ static esp_err_t run_policy_and_transact(const char *cmd, char *resp, size_t res
     return err;
 }
 
+/** @brief Route poll response to DTC / VIN / named PID publisher. */
 static void handle_poll_response(const profile_item_t *item, const char *resp)
 {
     if (!item || !resp) {
@@ -221,6 +229,7 @@ static void handle_poll_response(const profile_item_t *item, const char *resp)
     publish_pid_sample(item->cmd, item->decode, resp, true);
 }
 
+/** @brief Most-overdue due profile item index, or -1 (caller holds mutex). */
 static int pick_due_item_locked(uint64_t now)
 {
     int best_idx = -1;
@@ -239,6 +248,7 @@ static int pick_due_item_locked(uint64_t now)
     return best_idx;
 }
 
+/** @brief ms until next due item (capped 500); 0 if any due (holds mutex). */
 static uint32_t compute_wait_ms_locked(uint64_t now)
 {
     if (!s_profile_loaded || s_profile.item_count <= 0) {
@@ -266,6 +276,7 @@ static uint32_t compute_wait_ms_locked(uint64_t now)
     return (uint32_t)soonest;
 }
 
+/** @brief Fail pending raw requests with ESP_ERR_INVALID_STATE and signal done. */
 static void drain_raw_queue_on_stop(void)
 {
     raw_request_t raw;
@@ -280,6 +291,7 @@ static void drain_raw_queue_on_stop(void)
     }
 }
 
+/** @brief Run policy+transact for one raw queue item; signal completion. */
 static void handle_raw_request(const raw_request_t *raw)
 {
     esp_err_t result = ESP_ERR_INVALID_ARG;
@@ -299,6 +311,7 @@ static void handle_raw_request(const raw_request_t *raw)
     }
 }
 
+/** @brief Prefer raw queue; else profile PID poll via can_obd when enabled. */
 static void poller_task(void *arg)
 {
     (void)arg;

@@ -34,6 +34,7 @@ typedef struct {
     char name[32];
 } ps_registry_entry_t;
 
+/** @brief nvs_get_str size probe + malloc; caller frees @p *out_str. */
 static esp_err_t read_string_alloc(const char *key, char **out_str)
 {
     *out_str = NULL;
@@ -55,6 +56,10 @@ static esp_err_t read_string_alloc(const char *key, char **out_str)
     return ESP_OK;
 }
 
+/**
+ * @brief Load profile-name registry JSON from NVS "names".
+ * @note Missing key → empty registry (ESP_OK).
+ */
 static esp_err_t registry_load(ps_registry_entry_t entries[PS_MAX_PROFILES], int *count)
 {
     *count = 0;
@@ -89,6 +94,7 @@ static esp_err_t registry_load(ps_registry_entry_t entries[PS_MAX_PROFILES], int
     return ESP_OK;
 }
 
+/** @brief Persist profile-name registry to NVS "names" (no commit). */
 static esp_err_t registry_save(const ps_registry_entry_t entries[], int count)
 {
     cJSON *root = cJSON_CreateArray();
@@ -108,6 +114,7 @@ static esp_err_t registry_save(const ps_registry_entry_t entries[], int count)
     return err;
 }
 
+/** @brief Return registry slot index for @p name, or -1. */
 static int registry_find(const ps_registry_entry_t entries[], int count, const char *name)
 {
     for (int i = 0; i < count; ++i) {
@@ -118,6 +125,7 @@ static int registry_find(const ps_registry_entry_t entries[], int count, const c
     return -1;
 }
 
+/** @brief Format short NVS key "pN" for profile slot @p slot. */
 static void profile_key(int slot, char *buf, size_t buf_len)
 {
     snprintf(buf, buf_len, "p%d", slot);
@@ -125,6 +133,7 @@ static void profile_key(int slot, char *buf, size_t buf_len)
 
 /* ---- JSON <-> obd_profile_t --------------------------------------------- */
 
+/** @brief Serialize OBD poll profile to unformatted JSON (cJSON_free). */
 static char *profile_to_json(const obd_profile_t *p)
 {
     cJSON *root = cJSON_CreateObject();
@@ -154,6 +163,7 @@ static char *profile_to_json(const obd_profile_t *p)
     return json_str;
 }
 
+/** @brief Parse JSON blob into @p out OBD poll profile. */
 static esp_err_t json_to_profile(const char *json_str, obd_profile_t *out)
 {
     cJSON *root = cJSON_Parse(json_str);
@@ -212,6 +222,7 @@ static esp_err_t json_to_profile(const char *json_str, obd_profile_t *out)
 
 /* ---- JSON <-> ble_bond_t ------------------------------------------------- */
 
+/** @brief Serialize BLE bond to unformatted JSON (cJSON_free). */
 static char *bond_to_json(const ble_bond_t *b)
 {
     cJSON *root = cJSON_CreateObject();
@@ -234,6 +245,7 @@ static char *bond_to_json(const ble_bond_t *b)
     return json_str;
 }
 
+/** @brief Parse BLE bond JSON into @p out. */
 static esp_err_t json_to_bond(const char *json_str, ble_bond_t *out)
 {
     cJSON *root = cJSON_Parse(json_str);
@@ -278,8 +290,10 @@ static esp_err_t json_to_bond(const char *json_str, ble_bond_t *out)
 
 /* ---- validation ---------------------------------------------------------- */
 
-/* Profiles must stay read-only under the safety policy regardless of the
- * runtime `allow_unsafe` flag, so validation always uses allow_unsafe=false. */
+/**
+ * @brief Reject profile if any init_at/cmd fails cmd_policy.
+ * @note Always uses allow_unsafe=false so profiles stay read-only.
+ */
 static esp_err_t validate_profile_cmds(const obd_profile_t *p)
 {
     cmd_policy_config_t cfg = {.allow_unsafe = false};
@@ -298,8 +312,10 @@ static esp_err_t validate_profile_cmds(const obd_profile_t *p)
     return ESP_OK;
 }
 
-/* Stores/updates a profile's registry slot + JSON blob without validation;
- * used by profile_store_upsert (post-validation) and builtin seeding. */
+/**
+ * @brief Write profile registry slot + JSON blob; commit NVS.
+ * @note No cmd_policy check — caller validates or seeds builtins.
+ */
 static esp_err_t store_profile_raw(const obd_profile_t *p)
 {
     ps_registry_entry_t entries[PS_MAX_PROFILES];
@@ -340,6 +356,7 @@ static esp_err_t store_profile_raw(const obd_profile_t *p)
     return nvs_commit(s_handle);
 }
 
+/** @brief Insert missing builtin profiles; does not clobber existing names. */
 static esp_err_t seed_builtins(void)
 {
     for (size_t i = 0; i < BUILTIN_PROFILE_COUNT; ++i) {
@@ -365,6 +382,7 @@ static esp_err_t seed_builtins(void)
 
 /* ---- public API ------------------------------------------------------------ */
 
+/** @brief Open NVS "elm", seed builtins, ensure active profile. */
 esp_err_t profile_store_init(void)
 {
     if (s_ready) {
@@ -401,6 +419,7 @@ esp_err_t profile_store_init(void)
     return ESP_OK;
 }
 
+/** @brief Load active OBD poll profile JSON from NVS. */
 esp_err_t profile_store_get_active(obd_profile_t *out)
 {
     if (!s_ready || !out) {
@@ -439,6 +458,7 @@ esp_err_t profile_store_get_active(obd_profile_t *out)
     return err;
 }
 
+/** @brief Set NVS "active" to an existing profile name; commit. */
 esp_err_t profile_store_set_active(const char *name)
 {
     if (!s_ready || !name || !name[0]) {
@@ -462,6 +482,7 @@ esp_err_t profile_store_set_active(const char *name)
     return nvs_commit(s_handle);
 }
 
+/** @brief Copy registry names into @p names; @p *count is full registry size. */
 esp_err_t profile_store_list(char names[][32], int max, int *count)
 {
     if (!s_ready || !names || !count || max <= 0) {
@@ -484,6 +505,7 @@ esp_err_t profile_store_list(char names[][32], int max, int *count)
     return ESP_OK;
 }
 
+/** @brief Validate then store_profile_raw. */
 esp_err_t profile_store_upsert(const obd_profile_t *p)
 {
     if (!s_ready || !p || !p->name[0]) {
@@ -498,6 +520,7 @@ esp_err_t profile_store_upsert(const obd_profile_t *p)
     return store_profile_raw(p);
 }
 
+/** @brief Load BLE bond from NVS; empty bond if key missing. */
 esp_err_t profile_store_get_bond(ble_bond_t *out)
 {
     if (!s_ready || !out) {
@@ -519,6 +542,7 @@ esp_err_t profile_store_get_bond(ble_bond_t *out)
     return err;
 }
 
+/** @brief Persist BLE bond JSON to NVS; commit. */
 esp_err_t profile_store_set_bond(const ble_bond_t *b)
 {
     if (!s_ready || !b) {
@@ -537,6 +561,7 @@ esp_err_t profile_store_set_bond(const ble_bond_t *b)
     return nvs_commit(s_handle);
 }
 
+/** @brief Read allow_unsafe from NVS u8 "unsafe". */
 esp_err_t profile_store_get_safety(cmd_policy_config_t *out)
 {
     if (!s_ready || !out) {
@@ -555,6 +580,7 @@ esp_err_t profile_store_get_safety(cmd_policy_config_t *out)
     return ESP_OK;
 }
 
+/** @brief Write allow_unsafe to NVS; commit. */
 esp_err_t profile_store_set_allow_unsafe(bool allow)
 {
     if (!s_ready) {

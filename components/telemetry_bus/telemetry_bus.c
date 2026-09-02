@@ -14,6 +14,10 @@ static telemetry_subscriber_t s_subscribers[TELEMETRY_MAX_SUBSCRIBERS];
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_initialized = false;
 
+/**
+ * @brief Clear subscriber slots; mark bus ready.
+ * @note Critical section; call once before subscribe/publish.
+ */
 esp_err_t telemetry_bus_init(void)
 {
     portENTER_CRITICAL(&s_lock);
@@ -23,6 +27,10 @@ esp_err_t telemetry_bus_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Create filtered subscriber queue and register in table.
+ * @note Table insert under spinlock; deletes queue if table full.
+ */
 esp_err_t telemetry_subscribe(QueueHandle_t *out_queue, uint32_t filter_mask)
 {
     if (!out_queue) {
@@ -59,6 +67,10 @@ esp_err_t telemetry_subscribe(QueueHandle_t *out_queue, uint32_t filter_mask)
     return ESP_OK;
 }
 
+/**
+ * @brief Fan-out copy of @p msg to matching subscriber queues (non-blocking).
+ * @note Snapshot targets under spinlock; drop+metric on full queue.
+ */
 esp_err_t telemetry_publish(const telemetry_msg_t *msg)
 {
     if (!msg) {

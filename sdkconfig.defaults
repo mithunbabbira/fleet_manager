@@ -1,6 +1,7 @@
 CONFIG_IDF_TARGET="esp32c6"
 # CONFIG_BT_ENABLED is not set
-CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+# Wi-Fi SoftAP only when legacy on-device HTTP is enabled
+# CONFIG_ESP_WIFI_SOFTAP_SUPPORT is not set
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
@@ -24,5 +25,11 @@ CONFIG_FW_OTA_LTE_AUTO_CHECK=y
 CONFIG_FW_OTA_LTE_CHECK_URL="https://api.trafyn.info/workflow-engine/realm/1/user/1/v1/execution/service/runWithNoAuth/get-latest-device-firmware?refreshCache=true"
 CONFIG_FW_OTA_LTE_AUTO_WAIT_SEC=90
 CONFIG_FW_OTA_LTE_AUTO_INTERVAL_H=4
-CONFIG_ELM_SOFTAP_SSID="Fleet-C6"
-CONFIG_ELM_SOFTAP_PASS="fleetc61"
+# On-device HTTP/SoftAP off — use USB serial + tools/carrier_console on PC
+# CONFIG_ELM_HTTP_ENABLE is not set
+# Fleet Zigbee coordinator (ESP-Zigbee-SDK)
+CONFIG_FLEET_ZIGBEE_ENABLE=y
+CONFIG_FLEET_ZIGBEE_CHANNEL=15
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZCZR=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y

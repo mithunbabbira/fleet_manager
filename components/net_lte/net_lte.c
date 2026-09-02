@@ -23,6 +23,8 @@ static const char *TAG = "net_lte";
 static net_lte_status_t s_status;
 static bool s_uart_ready;
 static SemaphoreHandle_t s_uart_mutex;
+/* When true, gps_task skips AT so OTA QHTTP streams own the UART cleanly. */
+static volatile bool s_suspend_bg_at;
 static TaskHandle_t s_bringup_task;
 
 #if CONFIG_NET_LTE_GPS_ENABLE
@@ -36,6 +38,10 @@ static TaskHandle_t s_gps_task;
 static void gps_task(void *arg);
 #endif
 
+/**
+ * @brief Raw AT write + collect until OK/ERROR/READY or timeout (caller holds UART mutex).
+ * @note Drains stale UART bytes first. Returns ESP_OK when a terminator is seen (even ERROR).
+ */
 static esp_err_t at_transact_locked(const char *cmd, char *resp, size_t resp_len, int timeout_ms)
 {
     if (resp && resp_len) {
@@ -80,6 +86,9 @@ static esp_err_t at_transact_locked(const char *cmd, char *resp, size_t resp_len
     return ESP_ERR_TIMEOUT;
 }
 
+/**
+ * @brief Take UART mutex then at_transact_locked; timeout includes mutex wait slack.
+ */
 static esp_err_t at_transact(const char *cmd, char *resp, size_t resp_len, int timeout_ms)
 {
     if (s_uart_mutex == NULL) {
@@ -93,6 +102,9 @@ static esp_err_t at_transact(const char *cmd, char *resp, size_t resp_len, int t
     return err;
 }
 
+/**
+ * @brief Install/configure UART1 once (large RX buffer for QHTTP bodies).
+ */
 static esp_err_t uart_init(void)
 {
     if (s_uart_ready) {
@@ -127,6 +139,7 @@ static esp_err_t uart_init(void)
     return ESP_OK;
 }
 
+/** @brief Background: retry AT/ATI then refresh registration; deletes self when done. */
 static void bringup_task(void *arg)
 {
     (void)arg;
@@ -179,9 +192,9 @@ static void bringup_task(void *arg)
         ESP_LOGI(TAG, "ATI: %s", resp);
     }
 
-    strncpy(s_status.last_error, "UART AT OK; PPP not implemented yet",
+    strncpy(s_status.last_error, "UART AT OK; HTTP via QHTTP (no PPP)",
             sizeof(s_status.last_error) - 1);
-    ESP_LOGW(TAG, "UART path verified. PPP/Internet still TODO.");
+    ESP_LOGI(TAG, "modem UART ready — uplink/OTA use Quectel QHTTP AT commands");
 
     net_lte_refresh();
     ESP_LOGI(TAG, "modem: sim_ready=%d reg=%d attached=%d csq=%d op='%s'",
@@ -242,6 +255,9 @@ esp_err_t net_lte_start(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Parse +CSQ into s_status.csq and rssi_dbm.
+ */
 static void parse_csq(const char *resp)
 {
     const char *p = strstr(resp, "+CSQ:");
@@ -259,6 +275,9 @@ static void parse_csq(const char *resp)
     }
 }
 
+/**
+ * @brief Parse quoted operator name from +COPS.
+ */
 static void parse_cops(const char *resp)
 {
     const char *q = strchr(resp, '"');
@@ -360,6 +379,20 @@ static bool gps_enable_once(char *resp, size_t resp_len)
     return strstr(resp, "OK") != NULL;
 }
 
+void net_lte_suspend_bg_at(bool suspend)
+{
+    s_suspend_bg_at = suspend;
+    if (suspend) {
+        ESP_LOGI(TAG, "background AT suspended (OTA)");
+    } else {
+        ESP_LOGI(TAG, "background AT resumed");
+    }
+}
+
+/**
+ * @brief Enable GNSS with backoff, then poll QGPSLOC; honors s_suspend_bg_at.
+ * @note On CME 505 (inactive), re-enables. Fix can appear even if enable loop "failed".
+ */
 static void gps_task(void *arg)
 {
     (void)arg;
@@ -372,6 +405,9 @@ static void gps_task(void *arg)
     bool gps_enabled = false;
     int backoff_ms = NET_LTE_GPS_ENABLE_BACKOFF_MS;
     for (int attempt = 1; attempt <= NET_LTE_GPS_ENABLE_ATTEMPTS; ++attempt) {
+        while (s_suspend_bg_at) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
         if (gps_enable_once(resp, sizeof(resp))) {
             gps_enabled = true;
             if (attempt > 1) {
@@ -396,6 +432,9 @@ static void gps_task(void *arg)
     }
 
     for (;;) {
+        while (s_suspend_bg_at) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
         if (at_transact("AT+QGPSLOC=2", resp, sizeof(resp), 3000) == ESP_OK) {
             double lat = 0.0, lng = 0.0;
             if (parse_qgpsloc(resp, &lat, &lng)) {
@@ -459,6 +498,9 @@ esp_err_t net_lte_gps_get(net_lte_gps_t *out)
     return ESP_OK;
 }
 
+/**
+ * @brief Collect UART bytes for a fixed window (no token); used for URC tails / ping.
+ */
 static esp_err_t at_collect_locked(char *resp, size_t resp_len, int window_ms)
 {
     size_t used = 0;
@@ -639,6 +681,9 @@ esp_err_t net_lte_reconnect(void)
     return net_lte_start();
 }
 
+/**
+ * @brief Wait until @p token or ERROR appears in the response buffer.
+ */
 static esp_err_t at_wait_token_locked(char *resp, size_t resp_len, int timeout_ms,
                                       const char *token)
 {
@@ -667,6 +712,10 @@ static esp_err_t at_wait_token_locked(char *resp, size_t resp_len, int timeout_m
     return ESP_ERR_TIMEOUT;
 }
 
+/**
+ * @brief Ensure PDP: QICSGP + QIACT=1 (ERROR OK if already up) + parse IP from QIACT?.
+ * @return ESP_OK if IP present; ESP_FAIL otherwise.
+ */
 static esp_err_t ensure_pdp_locked(char *resp, size_t resp_len)
 {
     char cmd[96];
@@ -700,6 +749,9 @@ static esp_err_t ensure_pdp_locked(char *resp, size_t resp_len)
     return s_status.ip_up ? ESP_OK : ESP_FAIL;
 }
 
+/**
+ * @brief QHTTPURL length handshake: wait CONNECT, write URL, wait OK.
+ */
 static esp_err_t http_set_url_locked(const char *url, char *resp, size_t resp_len)
 {
     size_t url_len = strlen(url);
@@ -730,6 +782,9 @@ esp_err_t net_lte_http_post(const char *url, const char *body, net_lte_http_resu
     return net_lte_http_post_recv(url, body, NULL, NULL, 0, NULL, out);
 }
 
+/**
+ * @brief Shared GET setup: PDP, SSL/HTTP cfg, URL, QHTTPGET URC → status/content-length.
+ */
 static esp_err_t http_prepare_get_locked(const char *url, char *resp, size_t resp_len,
                                          int *http_status, size_t *content_len)
 {
@@ -797,6 +852,10 @@ static esp_err_t http_prepare_get_locked(const char *url, char *resp, size_t res
     return ESP_OK;
 }
 
+/**
+ * @brief After CONNECT, stream body to callback; skip leading CRLF so CL matches.
+ * @note Known content_len path is strict; unknown length uses idle timeout.
+ */
 static esp_err_t http_read_body_stream_locked(size_t content_len, net_lte_http_chunk_cb_t cb,
                                               void *ctx, char *scratch, size_t scratch_len)
 {
@@ -908,6 +967,9 @@ typedef struct {
     size_t used;
 } http_get_buf_ctx_t;
 
+/**
+ * @brief Chunk callback that appends into a fixed buffer (NUL-terminated).
+ */
 static esp_err_t http_get_buf_cb(const uint8_t *data, size_t len, void *ctx)
 {
     http_get_buf_ctx_t *c = (http_get_buf_ctx_t *)ctx;
@@ -920,7 +982,9 @@ static esp_err_t http_get_buf_cb(const uint8_t *data, size_t len, void *ctx)
     return ESP_OK;
 }
 
-/* Parse https://host/path?query → host + path_and_query (path starts at '/'). */
+/**
+ * @brief Split http(s)://host/path?query into host and path_and_query.
+ */
 static esp_err_t http_parse_url_host_path(const char *url, char *host, size_t host_len,
                                           char *path, size_t path_len)
 {
@@ -1390,12 +1454,14 @@ done:
 
 #else /* !CONFIG_NET_LTE_ENABLE */
 
+/** @brief Stub: returns ESP_ERR_NOT_SUPPORTED when CONFIG_NET_LTE_ENABLE is unset. */
 esp_err_t net_lte_start(void)
 {
     ESP_LOGI(TAG, "LTE disabled (CONFIG_NET_LTE_ENABLE=n)");
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/** @brief Stub: zero status with last_error noting LTE disabled. */
 esp_err_t net_lte_get_status(net_lte_status_t *out)
 {
     if (out == NULL) {
@@ -1406,11 +1472,13 @@ esp_err_t net_lte_get_status(net_lte_status_t *out)
     return ESP_OK;
 }
 
+/** @brief Stub: ESP_ERR_NOT_SUPPORTED. */
 esp_err_t net_lte_refresh(void)
 {
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/** @brief Stub: ESP_ERR_NOT_SUPPORTED. */
 esp_err_t net_lte_selftest(char *report, size_t len)
 {
     if (report && len) {
@@ -1419,11 +1487,13 @@ esp_err_t net_lte_selftest(char *report, size_t len)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/** @brief Stub: ESP_ERR_NOT_SUPPORTED. */
 esp_err_t net_lte_reconnect(void)
 {
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/** @brief Stub: empty GPS (gps_ok false). */
 esp_err_t net_lte_gps_get(net_lte_gps_t *out)
 {
     if (out == NULL) {
@@ -1488,6 +1558,11 @@ esp_err_t net_lte_http_get_stream(const char *url, net_lte_http_chunk_cb_t cb, v
         snprintf(out->error, sizeof(out->error), "CONFIG_NET_LTE_ENABLE=n");
     }
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+void net_lte_suspend_bg_at(bool suspend)
+{
+    (void)suspend;
 }
 
 #endif

@@ -32,34 +32,45 @@ typedef struct {
 } ble_bond_t;
 
 /**
- * Open the "elm" NVS namespace and make sure the built-in profiles
- * (fleet_basic, diagnostics) exist and an active profile is selected.
- * Must be called once, after nvs_flash_init().
+ * @brief Open NVS "elm", seed builtins, ensure an active OBD poll profile.
+ * @note Call once after nvs_flash_init(); not re-entrant across tasks without external sync.
  */
 esp_err_t profile_store_init(void);
 
-/** Fetch the currently active profile. */
+/** @brief Load the currently active OBD poll profile from NVS. */
 esp_err_t profile_store_get_active(obd_profile_t *out);
 
-/** Select an existing profile (by name) as active. */
+/**
+ * @brief Select an existing profile by name as active.
+ * @note Commits NVS; fails with ESP_ERR_NOT_FOUND if name is unknown.
+ */
 esp_err_t profile_store_set_active(const char *name);
 
-/** List the names of all stored profiles (up to `max`); `*count` is the total returned. */
+/** @brief List stored profile names (up to @p max); @p *count is total in registry. */
 esp_err_t profile_store_list(char names[][32], int max, int *count);
 
-/** Create or update a profile. Rejects any init_at/cmd that fails cmd_policy. */
+/**
+ * @brief Create or update a profile; rejects cmds that fail cmd_policy.
+ * @note Always validates with allow_unsafe=false; commits NVS on success.
+ */
 esp_err_t profile_store_upsert(const obd_profile_t *p);
 
-/** Fetch the saved BLE bond (addr_set is false if nothing is bonded yet). */
+/** @brief Load BLE bond from NVS (addr_set false if none). */
 esp_err_t profile_store_get_bond(ble_bond_t *out);
 
-/** Persist the BLE bond. */
+/**
+ * @brief Persist BLE bond JSON under NVS key "bond".
+ * @note Commits NVS.
+ */
 esp_err_t profile_store_set_bond(const ble_bond_t *b);
 
-/** Fetch the current safety configuration (allow_unsafe flag). */
+/** @brief Read cmd_policy allow_unsafe from NVS (default false). */
 esp_err_t profile_store_get_safety(cmd_policy_config_t *out);
 
-/** Persist the allow_unsafe flag. */
+/**
+ * @brief Persist allow_unsafe flag to NVS.
+ * @note Commits NVS.
+ */
 esp_err_t profile_store_set_allow_unsafe(bool allow);
 
 #ifdef __cplusplus

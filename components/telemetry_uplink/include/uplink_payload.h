@@ -7,9 +7,9 @@
  *   { "schemaId": "<id>", "payload": { ...device fields... } }
  * Batch POST is a JSON array of those objects.
  *
- * POST destination and schema id are compile-time constants (baked into the
- * .bin). They are not SoftAP/NVS-configurable today — change here and rebuild
- * to point at a different environment.
+ * POST destination and schema id default from UPLINK_* macros below.
+ * Runtime overrides live in NVS (serial / Carrier Console); firmware defaults
+ * apply when NVS is empty (same pattern as OTA check URL).
  */
 
 #include <stdbool.h>
@@ -36,7 +36,8 @@ extern "C" {
  *   - live single-event POST when microSD is not mounted
  *   - batch POST when draining the SD queue (JSON array body)
  *
- * Not stored in NVS — editing this string requires a new firmware image.
+ * Factory default when NVS uplink_url is empty. Override at runtime via serial
+ * `uplink url` or Carrier Console (persists in NVS; survives OTA).
  */
 #define UPLINK_URL "https://api.trafyn.info/nc-events-api/v2/messages"
 
@@ -47,6 +48,25 @@ typedef struct {
     char raw[48];
     uint32_t age_ms;
 } uplink_pid_view_t;
+
+#define UPLINK_MAX_HOSTS 4
+#define UPLINK_MAX_HOST_READINGS 8
+
+typedef struct {
+    char key[20];
+    double value;
+    char unit[8];
+    bool valid;
+} uplink_host_reading_t;
+
+typedef struct {
+    char device_id[32];
+    char host_type[24];
+    uint16_t host_type_id;
+    uint8_t reading_count;
+    uplink_host_reading_t readings[UPLINK_MAX_HOST_READINGS];
+    uint64_t ts_ms;
+} uplink_host_report_t;
 
 typedef struct {
     char device_id[40];
@@ -68,50 +88,39 @@ typedef struct {
     double lat;
     double lng;
     uint64_t ts_ms; /* capture time (esp_timer ms); sent in payload for replay */
+    uint8_t host_count;
+    uplink_host_report_t hosts[UPLINK_MAX_HOSTS];
 } uplink_snapshot_t;
 
-/**
- * Build cloud event JSON into out (NUL-terminated).
- * Returns bytes written excluding NUL, or -1 on failure.
- * Missing/stale/!ok PIDs omit value keys with *_ok false.
- */
-int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_len);
+/** @brief Live body {"schemaId","payload"}; @p schema_id NULL → UPLINK_SCHEMA_ID. */
+int uplink_payload_build(const uplink_snapshot_t *snap, const char *schema_id, char *out,
+                         size_t out_len);
 
-/** Build only the payload object `{...}` (no schemaId wrapper). */
+/** @brief Inner payload object only (PIDs, gps, device/node ids). */
 int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_t out_len);
 
-/**
- * Build one queued event line: {"payload":{...},"queued_at_ms":N}
- * payload_json is the object from uplink_payload_build_payload.
- */
+/** @brief NDJSON queue line with queued_at_ms. */
 int uplink_payload_build_queued_event(const char *payload_json, uint64_t queued_at_ms,
                                       char *out, size_t out_len);
 
 /**
- * Build batch POST body from NDJSON queued lines
- * (`{"payload":{...},"queued_at_ms":N}`). HTTP body is a JSON array:
- * [{"schemaId":"1087","payload":{...}}, ...]. queued_at_ms stays on SD only.
- * Inner payload (including gps_ok/lat/lng) is copied unchanged.
+ * @brief Batch array re-wrapping each queued payload with schemaId.
+ * @param schema_id NULL → UPLINK_SCHEMA_ID
  */
-int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *out,
-                               size_t out_len);
+int uplink_payload_build_batch(const char *events_blob, size_t n_events, const char *schema_id,
+                               char *out, size_t out_len);
 
-/** True if a PID should be emitted as a numeric value. */
 bool uplink_pid_is_fresh_ok(const uplink_pid_view_t *p);
 
-/** Store/send this tick if any OBD PID is fresh, or GNSS has a live fix. */
+/** @brief Enqueue if fresh OBD PID or live GPS. */
 bool uplink_should_enqueue(bool have_fresh_pid, bool gps_ok);
 
 #define UPLINK_GPS_ONLY_MIN_MOVE_M 50.0
 #define UPLINK_GPS_ONLY_HEARTBEAT_MS 300000ULL /* 5 min while parked */
 
-/** Great-circle distance in metres. */
 double uplink_gps_distance_m(double lat1, double lng1, double lat2, double lng2);
 
-/**
- * GPS-only ticks: send if first fix, moved >= UPLINK_GPS_ONLY_MIN_MOVE_M,
- * or heartbeat elapsed. have_last false → always send.
- */
+/** @brief GPS-only: first fix, ≥50 m move, or 5 min heartbeat. */
 bool uplink_gps_only_worth_sending(bool have_last, double last_lat, double last_lng,
                                    uint64_t last_ms, double lat, double lng, uint64_t now_ms);
 

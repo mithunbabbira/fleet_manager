@@ -24,6 +24,7 @@ bool uplink_pid_is_fresh_ok(const uplink_pid_view_t *p)
     return p->valid && p->ok && p->age_ms <= UPLINK_PID_FRESH_MS;
 }
 
+/** @brief Enqueue if fresh OBD PID or live GPS. */
 bool uplink_should_enqueue(bool have_fresh_pid, bool gps_ok)
 {
     return have_fresh_pid || gps_ok;
@@ -48,6 +49,7 @@ double uplink_gps_distance_m(double lat1, double lng1, double lat2, double lng2)
     return 2.0 * r_m * atan2(sqrt(a), sqrt(1.0 - a));
 }
 
+/** @brief GPS-only: first fix, ≥50 m move, or 5 min heartbeat. */
 bool uplink_gps_only_worth_sending(bool have_last, double last_lat, double last_lng,
                                    uint64_t last_ms, double lat, double lng, uint64_t now_ms)
 {
@@ -94,7 +96,7 @@ static int appendf(char *out, size_t out_len, size_t *off, const char *fmt, ...)
     return 0;
 }
 
-/* Minimal JSON string escape for device/node/protocol fields. */
+/** @brief JSON string escape (quotes/backslashes). */
 static int append_json_str(char *out, size_t out_len, size_t *off, const char *s)
 {
     if (append(out, out_len, off, "\"") != 0) {
@@ -123,8 +125,7 @@ static int append_json_str(char *out, size_t out_len, size_t *off, const char *s
     return append(out, out_len, off, "\"");
 }
 
-/* The schema rejects JSON null ("expected type: Number, found: Null"), so
- * stale/missing PIDs OMIT the value/raw/age keys and only send <ok>:false. */
+/** @brief Emit PID fields when fresh-ok; always emit <ok> bool (never null). */
 static int append_pid_fields(char *out, size_t out_len, size_t *off,
                              const char *num_key, const char *raw_key,
                              const char *age_key, const char *ok_key,
@@ -152,6 +153,7 @@ static int append_pid_fields(char *out, size_t out_len, size_t *off,
     return 0;
 }
 
+/** @brief Inner payload object only (PIDs, gps, device/node ids). */
 int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_t out_len)
 {
     if (!snap || !out || out_len < 32) {
@@ -236,13 +238,64 @@ int uplink_payload_build_payload(const uplink_snapshot_t *snap, char *out, size_
         }
     }
 
+    if (snap->host_count > 0) {
+        if (append(out, out_len, &off, ",\"hosts\":[") != 0) {
+            return -1;
+        }
+        for (uint8_t hi = 0; hi < snap->host_count && hi < UPLINK_MAX_HOSTS; hi++) {
+            const uplink_host_report_t *h = &snap->hosts[hi];
+            if (hi > 0 && append(out, out_len, &off, ",") != 0) {
+                return -1;
+            }
+            if (appendf(out, out_len, &off, "{\"device_id\":") != 0 ||
+                append_json_str(out, out_len, &off, h->device_id) != 0 ||
+                append(out, out_len, &off, ",\"host_type\":") != 0 ||
+                append_json_str(out, out_len, &off, h->host_type) != 0 ||
+                appendf(out, out_len, &off, ",\"host_type_id\":%u,\"readings\":[",
+                            (unsigned)h->host_type_id) != 0) {
+                return -1;
+            }
+            for (uint8_t ri = 0; ri < h->reading_count && ri < UPLINK_MAX_HOST_READINGS; ri++) {
+                const uplink_host_reading_t *r = &h->readings[ri];
+                if (ri > 0 && append(out, out_len, &off, ",") != 0) {
+                    return -1;
+                }
+                if (appendf(out, out_len, &off, "{\"key\":") != 0 ||
+                    append_json_str(out, out_len, &off, r->key) != 0 ||
+                    appendf(out, out_len, &off, ",\"value\":%.4g,\"unit\":") != 0 ||
+                    append_json_str(out, out_len, &off, r->unit) != 0 ||
+                    appendf(out, out_len, &off, ",\"valid\":%s}",
+                                r->valid ? "true" : "false") != 0) {
+                    return -1;
+                }
+            }
+            if (appendf(out, out_len, &off, "],\"ts_ms\":%llu}",
+                        (unsigned long long)h->ts_ms) != 0) {
+                return -1;
+            }
+        }
+        if (append(out, out_len, &off, "]") != 0) {
+            return -1;
+        }
+    }
+
     if (append(out, out_len, &off, ",\"source\":\"esp32_obd\"}") != 0) {
         return -1;
     }
     return (int)off;
 }
 
-int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_len)
+static const char *schema_or_default(const char *schema_id)
+{
+    if (schema_id != NULL && schema_id[0] != '\0') {
+        return schema_id;
+    }
+    return UPLINK_SCHEMA_ID;
+}
+
+/** @brief Live body {"schemaId","payload"}; length or -1. */
+int uplink_payload_build(const uplink_snapshot_t *snap, const char *schema_id, char *out,
+                         size_t out_len)
 {
     /* Live / no-SD path: wrap payload with schemaId for a single-object POST body. */
     if (!snap || !out || out_len < 32) {
@@ -258,7 +311,7 @@ int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_le
     if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
         return -1;
     }
-    if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
+    if (append(out, out_len, &off, schema_or_default(schema_id)) != 0) {
         return -1;
     }
     if (append(out, out_len, &off, "\",\"payload\":") != 0) {
@@ -273,6 +326,7 @@ int uplink_payload_build(const uplink_snapshot_t *snap, char *out, size_t out_le
     return (int)off;
 }
 
+/** @brief NDJSON queue line with queued_at_ms. */
 int uplink_payload_build_queued_event(const char *payload_json, uint64_t queued_at_ms,
                                       char *out, size_t out_len)
 {
@@ -295,6 +349,7 @@ int uplink_payload_build_queued_event(const char *payload_json, uint64_t queued_
 }
 
 /* Extract the JSON object that follows "payload": in a queued event line. */
+/** @brief Brace-match object after "payload": in a queue line. */
 static int extract_payload_object(const char *line, size_t line_len, const char **obj,
                                   size_t *obj_len)
 {
@@ -354,8 +409,9 @@ static int extract_payload_object(const char *line, size_t line_len, const char 
     return -1;
 }
 
-int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *out,
-                               size_t out_len)
+/** @brief Batch array re-wrapping each queued payload with schemaId. */
+int uplink_payload_build_batch(const char *events_blob, size_t n_events, const char *schema_id,
+                               char *out, size_t out_len)
 {
     /*
      * Drain path: turn SD NDJSON lines into the Trafyn array POST body.
@@ -402,7 +458,7 @@ int uplink_payload_build_batch(const char *events_blob, size_t n_events, char *o
         if (append(out, out_len, &off, "{\"schemaId\":\"") != 0) {
             return -1;
         }
-        if (append(out, out_len, &off, UPLINK_SCHEMA_ID) != 0) {
+        if (append(out, out_len, &off, schema_or_default(schema_id)) != 0) {
             return -1;
         }
         if (append(out, out_len, &off, "\",\"payload\":") != 0) {

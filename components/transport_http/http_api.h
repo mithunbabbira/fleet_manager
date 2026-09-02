@@ -6,11 +6,7 @@
 extern "C" {
 #endif
 
-/**
- * Register all REST API handlers (under /api) plus the "/" HTML page on
- * `server`, and start the telemetry-cache subscriber task backing
- * /api/telemetry. Call once, after the httpd server has been started.
- */
+/** @brief Register REST handlers under /api/ and the HTML UI on an already-started httpd. */
 esp_err_t http_api_register(httpd_handle_t server);
 
 #ifdef __cplusplus
