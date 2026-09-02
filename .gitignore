@@ -14,3 +14,4 @@ examples/**/sdkconfig
 .worktrees/
 .superpowers/
 .cache/
+build-host/
