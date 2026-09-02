@@ -19,6 +19,7 @@ import signal
 import threading
 import time
 import webbrowser
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,10 @@ STATIC = Path(__file__).resolve().parent / "static"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_HTTP = 8766
 
+# USB Serial/JTAG identity (macOS exposes this as serial_number).
+CARRIER_USB_SN = "10:BD:A3:96:5A:0C"
+HOST_USB_SN = "58:E6:C5:DB:7B:D4"  # refuse — Host Console owns this device
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 HOST_COUNT_RE = re.compile(r"host_count=(\d+)\s+joined=(\d+)")
 HOST_LINE_RE = re.compile(r"^\s{2}(\S+)\s+type=(\S+)\s+id=(\d+)\s+link=(\d+)\s+last=(\d+)")
@@ -47,6 +52,30 @@ PROVISION_RE = re.compile(r"^provisioned=(\w+)")
 
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
+
+
+def port_serial_number(port: str) -> str | None:
+    for p in serial.tools.list_ports.comports():
+        if p.device == port:
+            return p.serial_number
+    return None
+
+
+def assert_carrier_port(port: str) -> None:
+    sn = port_serial_number(port)
+    if sn == HOST_USB_SN:
+        raise RuntimeError(
+            f"{port} is the UL212 host (SN {HOST_USB_SN}). "
+            "Use Host Console there; Carrier Console needs "
+            f"SN {CARRIER_USB_SN} (usually /dev/cu.usbmodem1201)."
+        )
+
+
+def find_port_by_sn(serial_number: str) -> str | None:
+    for p in serial.tools.list_ports.comports():
+        if p.serial_number == serial_number:
+            return p.device
+    return None
 
 
 class SerialBridge:
@@ -101,13 +130,29 @@ class SerialBridge:
         self._loop = loop
 
     def connect(self, port: str) -> None:
+        assert_carrier_port(port)
         self.disconnect()
         with self._lock:
-            self._ser = serial.Serial(port, BAUD, timeout=0.15)
-            self._ser.dtr = False
-            self._ser.rts = False
+            # Set DTR/RTS before open — post-open is too late on ESP32-C6 USB-JTAG
+            # and can leave the ROM in "waiting for download".
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = BAUD
+            ser.timeout = 0.15
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+            try:
+                ser.dtr = False
+                ser.rts = False
+            except Exception:
+                pass
             time.sleep(0.15)
-            self._ser.reset_input_buffer()
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
+            self._ser = ser
             self._port = port
             self._last_rx_at = None
             self._stop.clear()
@@ -115,7 +160,13 @@ class SerialBridge:
             self._reader.start()
             self._poller = threading.Thread(target=self._poll_loop, daemon=True)
             self._poller.start()
-        self._schedule_broadcast({"type": "system", "line": f"Connected to {port} @ {BAUD}"})
+        self._schedule_broadcast({"type": "clear_log"})
+        self._schedule_broadcast(
+            {
+                "type": "system",
+                "line": f"Connected to {port} @ {BAUD} (carrier SN {port_serial_number(port) or '?'})",
+            }
+        )
 
     def disconnect(self) -> None:
         self._stop.set()
@@ -158,7 +209,14 @@ class SerialBridge:
         self._schedule_broadcast({"type": "serial_lost", "port": port, "reason": reason})
         if port:
             self._schedule_broadcast(
-                {"type": "system", "line": f"Serial lost ({reason}) — reconnecting…"}
+                {
+                    "type": "system",
+                    "line": (
+                        f"Serial lost ({reason}). Not auto-reopening USB "
+                        "(avoids ESP32-C6 download mode). Click Connect after the board is up; "
+                        "press RESET on the ESP if you see 'waiting for download'."
+                    ),
+                }
             )
 
     def send_line(self, line: str) -> None:
@@ -298,7 +356,6 @@ class SerialBridge:
 
     def _read_loop(self) -> None:
         buf = ""
-        idle_reads = 0
         while not self._stop.is_set():
             with self._lock:
                 ser = self._ser
@@ -310,12 +367,9 @@ class SerialBridge:
                 self._on_serial_lost(str(exc))
                 return
             if not chunk:
-                idle_reads += 1
-                if idle_reads > 80:
-                    self._on_serial_lost("no data (device reset?)")
-                    return
+                # Quiet periods are normal — do NOT treat idle USB as device loss.
+                # (Old idle-timeout reopen cycles forced ESP32-C6 into download mode.)
                 continue
-            idle_reads = 0
             self._last_rx_at = time.monotonic()
             buf += chunk.decode("utf-8", errors="replace")
             while "\n" in buf:
@@ -355,12 +409,16 @@ class SerialBridge:
 
 
 bridge = SerialBridge()
-app = FastAPI(title="Fleet Carrier Console", docs_url=None, redoc_url=None)
 
 
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     bridge.set_loop(asyncio.get_running_loop())
+    yield
+    bridge.disconnect()
+
+
+app = FastAPI(title="Fleet Carrier Console", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.get("/")
@@ -372,8 +430,14 @@ async def index() -> FileResponse:
 async def list_ports() -> dict[str, list[dict[str, str]]]:
     ports = []
     for p in serial.tools.list_ports.comports():
-        ports.append({"device": p.device, "description": p.description or p.device})
-    return {"ports": ports}
+        ports.append(
+            {
+                "device": p.device,
+                "description": p.description or p.device,
+                "serial_number": p.serial_number or "",
+            }
+        )
+    return {"ports": ports, "carrier_usb_sn": CARRIER_USB_SN, "host_usb_sn": HOST_USB_SN}
 
 
 @app.get("/api/connection")
@@ -468,12 +532,28 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--http-port", type=int, default=DEFAULT_HTTP)
-    ap.add_argument("--port", "-p", help="Auto-connect this serial device on start")
+    ap.add_argument(
+        "--port",
+        "-p",
+        help=f"Auto-connect this serial device (must be carrier SN {CARRIER_USB_SN})",
+    )
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    if args.port:
-        threading.Timer(3.0, lambda: bridge.connect(args.port)).start()
+    port = args.port
+    if not port:
+        port = find_port_by_sn(CARRIER_USB_SN)
+    if port:
+        def _auto() -> None:
+            try:
+                bridge.connect(port)
+            except Exception as exc:
+                print(f"Carrier auto-connect failed: {exc}")
+
+        threading.Timer(3.0, _auto).start()
+        print(f"Will auto-connect carrier port {port}")
+    else:
+        print(f"Carrier USB SN {CARRIER_USB_SN} not found — pick port in UI")
 
     url = f"http://{args.host}:{args.http_port}/"
     if not args.no_browser:

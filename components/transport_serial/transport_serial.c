@@ -5,6 +5,7 @@
 #include "fw_ota.h"
 #include "fw_ota_lte.h"
 #include "net_lte.h"
+#include "net_lte_time_util.h"
 #include "obd_codec.h"
 #include "obd_poller.h"
 #include "profile_store.h"
@@ -570,6 +571,23 @@ static void cmd_lte(char *args)
            s.attached ? "yes" : "no",
            s.csq, s.rssi_dbm, s.operator_name, s.apn);
     printf("     module=\"%s\" note=\"%s\"\n", s.ati, s.last_error);
+
+    /* Wall clock for uplink ts_ms: UTC epoch + IST display (India-only product). */
+    net_lte_time_t t;
+    if (net_lte_time_get(&t) == ESP_OK && t.time_ok) {
+        char ist[24];
+        const char *src = (t.source == NET_LTE_TIME_GPS) ? "GPS"
+                          : (t.source == NET_LTE_TIME_CCLK) ? "CCLK" : "?";
+        if (net_lte_format_ist(t.epoch_ms_utc, ist, sizeof(ist)) >= 0) {
+            printf("     time_ok=yes source=%s utc_ms=%llu ist=\"%s\"\n",
+                   src, (unsigned long long)t.epoch_ms_utc, ist);
+        } else {
+            printf("     time_ok=yes source=%s utc_ms=%llu\n",
+                   src, (unsigned long long)t.epoch_ms_utc);
+        }
+    } else {
+        printf("     time_ok=no (ts_ms falls back to uptime until CCLK/GPS sync)\n");
+    }
 }
 
 /** @brief Print CAN/poller/profile status plus metrics JSON. */

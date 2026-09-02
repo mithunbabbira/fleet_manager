@@ -13,9 +13,13 @@ static BLEUUID serviceUUID((uint16_t)0xFFE0);
 static BLEUUID charFfe1((uint16_t)0xFFE1);
 static BLEUUID charFfe2((uint16_t)0xFFE2);
 
+/* Vendor app (UNI__9933E72): primary unlock CC9D…; alt unlock 7D5A… also present. */
 static const uint8_t CMD_UNLOCK[] = {0x09, 0x06, 0x01, 0x07, 0xCC, 0x9D, 0xAC, 0x16};
+static const uint8_t CMD_UNLOCK_ALT[] = {0x09, 0x06, 0x01, 0x07, 0x7D, 0x5A, 0x99, 0xD4};
 static const uint8_t CMD_POLL[] = {0x09, 0x03, 0x00, 0xFD, 0x00, 0x1C, 0xD4, 0xBB};
 static const size_t REPLY_LEN = 4 + 28 * 2 + 2;
+/* Soft re-auth before tearing down GATT (reduces reconnect thrash in production). */
+static const uint8_t SOFT_RECOVER_MAX = 2;
 
 static BLEClient *pClient = nullptr;
 static BLERemoteCharacteristic *pWriteChar = nullptr;
@@ -32,6 +36,7 @@ static size_t rxLen = 0;
 static uint32_t rxLastMs = 0;
 static uint32_t lastRxMs = 0;
 static uint32_t lastConnectMs = 0;
+static volatile bool pollPaused = false;
 
 static Ul212Reading latest;
 static BleStats stats;
@@ -212,7 +217,7 @@ static bool pickEndpoint(BLERemoteService *svc) {
   BLERemoteCharacteristic *writeCh = nullptr;
 
   if (ffe1 && ffe2) {
-    // Vendor app: notify on FFE1, write on FFE2 when FFE2 is writable.
+    // Vendor Be(): notify=FFE1; write=FFE2 if writable else FFE1.
     notifyCh = charNotifiable(ffe1) ? ffe1 : nullptr;
     writeCh = charWritable(ffe2) ? ffe2 : nullptr;
     if (!writeCh && charWritable(ffe1)) writeCh = ffe1;
@@ -292,11 +297,34 @@ static bool connectAndUnlock(const char *mac) {
   return true;
 }
 
+/** Re-unlock + poll without tearing down GATT. Returns false if link already dead. */
+static bool softRecover() {
+  if (!bleUl212Connected() || !pWriteChar) return false;
+  logEvent("soft recover (unlock+poll)");
+  sendCmd(CMD_UNLOCK, sizeof(CMD_UNLOCK));
+  delay(250);
+  /* If primary unlock never produced frames, try vendor alternate once. */
+  if (!latest.valid) {
+    sendCmd(CMD_UNLOCK_ALT, sizeof(CMD_UNLOCK_ALT));
+    delay(250);
+  }
+  rxLen = 0;
+  sendCmd(CMD_POLL, sizeof(CMD_POLL));
+  return true;
+}
+
 void bleUl212Begin() {
   stateMux = xSemaphoreCreateMutex();
   esp_coex_preference_set(ESP_COEX_PREFER_BT);
   BLEDevice::init("UL212_BLE_FETCH");
   BLEDevice::setMTU(512);
+}
+
+void bleUl212PausePolling(bool pause) { pollPaused = pause; }
+
+void bleUl212PreferZigbeeAirtime(bool prefer_zigbee) {
+  /* On ESP32-C6, IEEE802.15.4 (Zigbee) shares the WiFi coex side. */
+  esp_coex_preference_set(prefer_zigbee ? ESP_COEX_PREFER_WIFI : ESP_COEX_PREFER_BT);
 }
 
 void bleUl212ApplyConfig(const char *sensorMac, uint32_t pollMs, uint32_t silenceMs) {
@@ -365,13 +393,17 @@ size_t bleUl212Scan(BleScanEntry *out, size_t maxEntries) {
 }
 
 void bleUl212Task(void *) {
-  static const uint32_t BACKOFF_MIN_MS = 1000, BACKOFF_MAX_MS = 15000;
+  static const uint32_t BACKOFF_MIN_MS = 2000, BACKOFF_MAX_MS = 30000;
   uint32_t backoffMs = BACKOFF_MIN_MS;
+  uint8_t softRecoverLeft = SOFT_RECOVER_MAX;
+  uint32_t softGraceUntilMs = 0;
 
   for (;;) {
     if (configDirty) {
       configDirty = false;
       releaseClient();
+      softRecoverLeft = SOFT_RECOVER_MAX;
+      softGraceUntilMs = 0;
     }
 
     if (!bleUl212Configured()) {
@@ -388,13 +420,40 @@ void bleUl212Task(void *) {
         continue;
       }
       backoffMs = BACKOFF_MIN_MS;
+      softRecoverLeft = SOFT_RECOVER_MAX;
+      softGraceUntilMs = 0;
     }
 
-    if (lastRxMs && millis() - lastRxMs > silenceTimeoutMs) {
+    const uint32_t now = millis();
+    if (lastRxMs && now - lastRxMs > silenceTimeoutMs) {
+      if (now < softGraceUntilMs) {
+        sendCmd(CMD_POLL, sizeof(CMD_POLL));
+        vTaskDelay(pdMS_TO_TICKS(pollIntervalMs));
+        continue;
+      }
       stats.watchdogTrips++;
-      logEvent("silent %lus — reconnecting", (unsigned long)((millis() - lastRxMs) / 1000));
+      if (softRecoverLeft > 0 && softRecover()) {
+        softRecoverLeft--;
+        softGraceUntilMs = now + max<uint32_t>(pollIntervalMs * 3, 3000);
+        logEvent("silent %lus — soft recover (%u left)",
+                 (unsigned long)((now - lastRxMs) / 1000),
+                 (unsigned)softRecoverLeft);
+        vTaskDelay(pdMS_TO_TICKS(pollIntervalMs));
+        continue;
+      }
+      logEvent("silent %lus — full reconnect", (unsigned long)((now - lastRxMs) / 1000));
       releaseClient();
-      vTaskDelay(pdMS_TO_TICKS(500));
+      softRecoverLeft = SOFT_RECOVER_MAX;
+      softGraceUntilMs = 0;
+      vTaskDelay(pdMS_TO_TICKS(800));
+      continue;
+    }
+
+    if (latest.valid) softRecoverLeft = SOFT_RECOVER_MAX;
+
+    if (pollPaused) {
+      /* Zigbee air-slice: keep GATT up, skip Modbus polls so RF is free. */
+      vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
 

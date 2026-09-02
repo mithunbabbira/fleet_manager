@@ -70,3 +70,7 @@ size_t bleUl212Scan(BleScanEntry *out, size_t maxEntries);
 
 /* FreeRTOS task — pass nullptr. Runs forever. */
 void bleUl212Task(void *param);
+
+/* Time-slice helpers for BLE + Zigbee coexistence on one radio. */
+void bleUl212PausePolling(bool pause);
+void bleUl212PreferZigbeeAirtime(bool prefer_zigbee);

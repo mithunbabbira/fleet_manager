@@ -92,11 +92,12 @@ int main(void)
     int jn = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(jn > 0);
     assert(strstr(buf, "\"schemaId\":\"1088\"") != NULL);
-    assert(strstr(buf, "\"height_mm\"") != NULL);
+    assert(strstr(buf, "\"height_mm\":") != NULL);
+    assert(strstr(buf, "\"host_type\":\"ul212_ble_fetch\"") != NULL);
     assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
     assert(reg.hosts[0].readings[0].valid);
     assert(reg.hosts[0].readings[0].value > 40.8 && reg.hosts[0].readings[0].value < 41.0);
-    assert(strstr(buf, "\"value\":") != NULL);
+    assert(strstr(buf, "\"key\":\"height_mm\"") == NULL);
     assert(strstr(buf, "\"hosts\":[") == NULL);
 
     printf("test_fleet_uplink_path: PASS\n");

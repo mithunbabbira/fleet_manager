@@ -106,3 +106,12 @@ target_compile_definitions(test_fleet_uplink_path PRIVATE HOST_REGISTRY_HOST_TES
 target_link_libraries(test_fleet_uplink_path m)
 
 add_test(NAME test_fleet_uplink_path COMMAND test_fleet_uplink_path)
+
+add_executable(test_net_lte_time
+    test_net_lte_time.c
+    ${CMAKE_SOURCE_DIR}/../../components/net_lte/net_lte_time_util.c
+)
+target_include_directories(test_net_lte_time PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../components/net_lte/include
+)
+add_test(NAME test_net_lte_time COMMAND test_net_lte_time)

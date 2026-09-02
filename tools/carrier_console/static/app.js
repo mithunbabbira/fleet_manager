@@ -20,7 +20,7 @@ const carrier = {
   uplink: null,
 };
 
-const HOST_STALE_MS = 5000;
+const HOST_STALE_MS = 20000;
 
 let hostsState = null;
 let hostsRenderTimer = null;
@@ -146,8 +146,10 @@ function renderHosts() {
       const chip = (key, label, hero) => {
         const r = readings[key];
         if (!r) return "";
-        const val = online ? (r.value ?? "—") : "—";
-        const unit = online && r.unit ? `<span class="ru">${r.unit}</span>` : "";
+        /* Keep last known values visible even when link is stale — serial log
+         * already shows them; blanking the cards looked like a UI bug. */
+        const val = r.value ?? "—";
+        const unit = r.unit ? `<span class="ru">${r.unit}</span>` : "";
         return `<div class="reading${hero ? " hero-reading" : ""}"><span class="rk">${label}</span><span class="rv">${val}${unit}</span></div>`;
       };
 
@@ -245,7 +247,7 @@ function noteUptime(uptimeS) {
 }
 
 function parseRxLogOnly(raw) {
-  const line = stripAnsi(raw).trim();
+  let line = stripAnsi(raw).trim();
   if (!line) return;
   line = line.replace(/^(?:obd>\s*)+/g, "").trim();
   if (!line) return;
@@ -396,11 +398,18 @@ async function refreshPorts() {
   const data = await api("/api/ports");
   const sel = $("portSel");
   const cur = sel.value;
+  const carrierSn = data.carrier_usb_sn || "10:BD:A3:96:5A:0C";
+  const hostSn = data.host_usb_sn || "58:E6:C5:DB:7B:D4";
   sel.innerHTML = "";
   for (const p of data.ports) {
     const o = document.createElement("option");
     o.value = p.device;
-    o.textContent = `${p.device} — ${p.description}`;
+    const sn = p.serial_number || "";
+    let tag = "";
+    if (sn === carrierSn) tag = " [CARRIER]";
+    if (sn === hostSn) tag = " [HOST — do not use here]";
+    o.textContent = `${p.device}${tag} — ${p.description}`;
+    if (sn === hostSn) o.disabled = true;
     sel.appendChild(o);
   }
   if (activePort) {
@@ -408,7 +417,9 @@ async function refreshPorts() {
   } else if (cur) {
     sel.value = cur;
   } else {
-    const preferred = data.ports.find((p) => /usbmodem/i.test(p.device));
+    const preferred =
+      data.ports.find((p) => p.serial_number === carrierSn) ||
+      data.ports.find((p) => /usbmodem1201/i.test(p.device));
     if (preferred) sel.value = preferred.device;
   }
   syncConnectUi();
@@ -454,37 +465,14 @@ async function watchConnection() {
     stopHostsTimer();
     hostsState = null;
     renderHosts();
-    await autoReconnect();
+    // Do NOT auto-reopen USB — that puts ESP32-C6 into ROM download mode after
+    // host/carrier power cycles and mixes old log buffers across devices.
     return;
-  }
-  if (s.rx_stale && activePort && !reconnectBusy) {
-    await autoReconnect();
   }
 }
 
 async function autoReconnect() {
-  const port = activePort || $("portSel").value;
-  if (!port || reconnectBusy) return;
-  reconnectBusy = true;
-  $("linkPill").textContent = `reconnecting · ${port}`;
-  $("linkPill").className = "pill";
-  try {
-    await api("/api/disconnect", { method: "POST" }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 600));
-    await api("/api/connect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ port }),
-    });
-    lastUptimeS = null;
-    await refreshConn();
-  } catch (e) {
-    $("linkPill").textContent = "disconnected";
-    $("linkPill").className = "pill down";
-    syncConnectUi();
-  } finally {
-    reconnectBusy = false;
-  }
+  /* Intentionally disabled. Manual Connect only. */
 }
 
 let pollBusy = false;
@@ -535,6 +523,10 @@ async function refreshConn() {
   }
 }
 
+function clearLog() {
+  logEl.innerHTML = "";
+}
+
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -545,9 +537,13 @@ function connectWs() {
       applyDashboard(msg.data);
       return;
     }
+    if (msg.type === "clear_log") {
+      clearLog();
+      return;
+    }
     if (msg.type === "serial_lost") {
       appendLog("sys", `Serial lost: ${msg.reason || "device reset"}`);
-      refreshConn().then(() => autoReconnect()).catch(() => {});
+      refreshConn().catch(() => {});
       return;
     }
     if (msg.type === "tx") appendLog("tx", "→ " + msg.line);

@@ -30,7 +30,7 @@ python3 tools/host_console/app.py --port /dev/cu.usbmodem1201
 
 1. Plug host ESP32-C6 via USB.
 2. Click **Refresh** → pick serial port → **Connect**.
-3. **Scan BLE** → click a MAC → set **Device ID** → **Apply & Save**.
+3. **Scan BLE** → click a listed MAC (fills MAC, saves to NVS, reboots). Or edit fields and **Apply & Save**.
 4. On carrier USB serial: `fleet hosts` → confirm readings.
 
 ## Architecture

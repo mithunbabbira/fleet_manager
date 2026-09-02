@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>UL212 Host Console</title>
-  <link rel="stylesheet" href="/static/style.css?v=2">
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
   <div class="wrap">
@@ -25,6 +25,10 @@
         <button type="button" id="disconnectBtn">Disconnect</button>
       </div>
       <p class="hint">ESP32 sends data over USB serial only. This page runs on your computer.</p>
+      <p class="hint warn" id="bootWarn" hidden>
+        Board is in USB download mode (app not running). Press the physical RESET button on the Seeed —
+        do not click Reconnect. Height stays -- until you see <code>UL212 BLE Fetch</code> in the log.
+      </p>
     </section>
 
     <section class="hero card">
@@ -59,6 +63,6 @@
       </section>
     </div>
   </div>
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

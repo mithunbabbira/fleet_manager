@@ -141,11 +141,12 @@ status, profile, telemetry, LTE, uplink, VIN, DTC, and OBD APIs — see
 ## LTE uplink
 
 `telemetry_uplink` emits **multiple typed events** per tick (OBD `1087`, GPS `1089`,
-host reading `1088`) with envelope `{device_id, node_id, schemaId, ts_ms, payload}`.
-`ts_ms` uses modem wall-clock when available (`AT+CCLK?` network time, else GPS UTC
-from the existing `QGPSLOC` poll); falls back to uptime ms until first sync.
-Events queue one-per-line on microSD and batch-POST as a JSON array. See
-`docs/telemetry-api-backend-guide.md`.
+host snapshot `1088`) with envelope `{device_id, node_id, schemaId, ts_ms, payload}`.
+Live POST: one JSON object when count==1, JSON array when count>1. Batch/SD drain
+is always an array. `ts_ms` is **UTC epoch ms** from modem wall-clock when available
+(`AT+CCLK?` network time, else GPS UTC from `QGPSLOC`); falls back to uptime ms until
+first sync. Convert to IST only for India display. Events queue one-per-line on microSD
+and batch-POST as a JSON array. See `docs/telemetry-api-backend-guide.md`.
 
 Bench 2026-08-18: modem registered on Airtel (`csq=18`); HTTP left the module
 (server 400 is an API/payload issue, not a UART failure). Backend must register
@@ -155,8 +156,9 @@ schemas `1088` and `1089` for host and GPS events.
 
 Optional second ESP32-C6 hosts join an **open** Zigbee network on channel 15 and
 send `fleet_tlv` frames on custom cluster `0xFC00`. Coordinator ingest updates
-`host_registry`; each valid host reading becomes a separate schema-`1088` uplink
-event (not a nested `hosts[]` array).
+`host_registry`; each Zigbee host with valid readings becomes **one** schema-`1088`
+uplink event with metrics bundled as flat keys on `payload` (not one event per
+reading, and not a nested `hosts[]` array).
 
 Docs: `docs/fleet-zigbee-host-guide.md`, `docs/fleet-zigbee-coexistence.md`.
 

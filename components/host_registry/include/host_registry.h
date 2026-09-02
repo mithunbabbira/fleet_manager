@@ -14,9 +14,10 @@ extern "C" {
 #define FLEET_REGISTRY_MAX_HOSTS 16
 #define FLEET_REGISTRY_MAX_READINGS FLEET_MANIFEST_MAX_READINGS
 
-/** No REPORT/HELLO within this window → host marked offline in snapshot. */
+/** No REPORT/HELLO within this window → host marked offline in snapshot.
+ *  BLE+Zigbee coexistence can leave multi-second gaps; 5s was too tight. */
 #ifndef FLEET_HOST_STALE_MS
-#define FLEET_HOST_STALE_MS 5000
+#define FLEET_HOST_STALE_MS 20000
 #endif
 
 typedef struct {

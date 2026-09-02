@@ -138,7 +138,7 @@ int main(void)
     assert(buf[0] == '{');
     assert(buf[0] != '[');
 
-    /* Host readings split into one event per valid reading. */
+    /* Host readings: one bundled 1088 event (all valid metrics). */
     fill_base_snapshot(&snap);
     snap.gps_ok = false;
     emit.include_obd = false;
@@ -148,17 +148,27 @@ int main(void)
     snprintf(snap.hosts[0].host_type, sizeof(snap.hosts[0].host_type), "%s", "ul212_ble_fetch");
     snap.hosts[0].host_type_id = 1;
     snap.hosts[0].ts_ms = 1710000001100ULL;
-    snap.hosts[0].reading_count = 2;
+    snap.hosts[0].reading_count = 4;
     snprintf(snap.hosts[0].readings[0].key, sizeof(snap.hosts[0].readings[0].key), "%s",
              "height_mm");
     snap.hosts[0].readings[0].value = 40.9;
     snprintf(snap.hosts[0].readings[0].unit, sizeof(snap.hosts[0].readings[0].unit), "%s", "mm");
     snap.hosts[0].readings[0].valid = true;
     snprintf(snap.hosts[0].readings[1].key, sizeof(snap.hosts[0].readings[1].key), "%s",
+             "temperature_c");
+    snap.hosts[0].readings[1].value = 33.2;
+    snprintf(snap.hosts[0].readings[1].unit, sizeof(snap.hosts[0].readings[1].unit), "%s", "C");
+    snap.hosts[0].readings[1].valid = true;
+    snprintf(snap.hosts[0].readings[2].key, sizeof(snap.hosts[0].readings[2].key), "%s",
+             "tilt_deg");
+    snap.hosts[0].readings[2].value = 3;
+    snap.hosts[0].readings[2].unit[0] = '\0';
+    snap.hosts[0].readings[2].valid = true;
+    snprintf(snap.hosts[0].readings[3].key, sizeof(snap.hosts[0].readings[3].key), "%s",
              "signal");
-    snap.hosts[0].readings[1].value = 85;
-    snprintf(snap.hosts[0].readings[1].unit, sizeof(snap.hosts[0].readings[1].unit), "%s", "");
-    snap.hosts[0].readings[1].valid = false;
+    snap.hosts[0].readings[3].value = 85;
+    snap.hosts[0].readings[3].unit[0] = '\0';
+    snap.hosts[0].readings[3].valid = false; /* omitted from payload */
     assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
                                        &count) == 0);
     assert(count == 1);
@@ -167,9 +177,13 @@ int main(void)
     assert(strstr(buf, "\"schemaId\":\"1088\"") != NULL);
     assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
     assert(strstr(buf, "\"node_id\":\"node-ul212-001\"") != NULL);
-    assert(strstr(buf, "\"height_mm\"") != NULL);
-    assert(strstr(buf, "\"value\":40.9") != NULL);
+    assert(strstr(buf, "\"host_type\":\"ul212_ble_fetch\"") != NULL);
+    assert(strstr(buf, "\"height_mm\":40.9") != NULL);
+    assert(strstr(buf, "\"temperature_c\":33.2") != NULL);
+    assert(strstr(buf, "\"tilt_deg\":3") != NULL);
+    assert(strstr(buf, "\"signal\":") == NULL); /* invalid reading skipped */
     assert(strstr(buf, "\"hosts\":[") == NULL);
+    assert(strstr(buf, "\"key\":\"height_mm\"") == NULL); /* not per-reading envelope */
 
     assert(uplink_should_enqueue(true, false) == true);
     assert(uplink_should_enqueue(false, true) == true);

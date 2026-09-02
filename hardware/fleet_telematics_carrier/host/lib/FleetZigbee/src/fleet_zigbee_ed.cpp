@@ -225,9 +225,8 @@ bool fleetZigbeeEdSendReport(const FleetZigbeeReading *readings, size_t count, u
     }
 #endif
     const bool ok = sendTlv(FLEET_MSG_REPORT, readings, count, status, seq);
-    if (!ok) {
-        clearJoinState();
-    }
+    /* Do not clearJoinState on a single TX fail — BLE coexistence often
+     * drops one frame; tearing join caused report bursts then long gaps. */
     return ok;
 }
 

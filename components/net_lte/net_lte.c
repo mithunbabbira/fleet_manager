@@ -1,4 +1,5 @@
 #include "net_lte.h"
+#include "net_lte_time_util.h"
 
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -41,8 +42,6 @@ static int64_t s_last_cclk_query_ms;
 #define NET_LTE_CCLK_MIN_INTERVAL_MS (30 * 60 * 1000LL)
 /* Retry sooner while the clock is still unset. */
 #define NET_LTE_CCLK_RETRY_MS        (60 * 1000LL)
-/* India has a single timezone (UTC+5:30) and no DST; CCLK reports it as +22. */
-#define NET_LTE_TZ_QUARTERS_IST      22
 
 #if CONFIG_NET_LTE_GPS_ENABLE
 /* GNSS cache, protected by its own mutex (independent of modem UART traffic
@@ -57,29 +56,6 @@ static void gps_task_start(void);
 #endif
 
 static esp_err_t at_transact(const char *cmd, char *resp, size_t resp_len, int timeout_ms);
-
-/** @brief Gregorian UTC datetime → Unix epoch ms (no libc TZ). */
-static int64_t utc_datetime_to_epoch_ms(int year, int month, int day, int hour, int minute,
-                                        int second)
-{
-    if (year < 2000 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 ||
-        hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
-        return -1;
-    }
-    int y = year;
-    int m = month;
-    if (m <= 2) {
-        y -= 1;
-        m += 12;
-    }
-    int era = y / 400;
-    int yoe = y - era * 400;
-    int doy = (153 * (m - 3) + 2) / 5 + day - 1;
-    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    int64_t days = (int64_t)era * 146097 + doe - 719468;
-    int64_t secs = days * 86400LL + (int64_t)hour * 3600LL + (int64_t)minute * 60LL + second;
-    return secs * 1000LL;
-}
 
 /* Plausible window for a fielded device; rejects garbage AT parses. */
 #define NET_LTE_TIME_MIN_EPOCH_MS 1735689600000LL /* 2025-01-01 UTC */
@@ -119,52 +95,11 @@ static void time_apply_sync(int64_t epoch_ms_utc, net_lte_time_source_t source)
 }
 
 /**
- * @brief Parse +CCLK local/UTC time; India networks typically report +22 (IST).
- * @note One AT query per refresh interval — low UART load.
+ * @brief Parse +CCLK via shared util (IST-aware); one AT query — low UART load.
  */
 static bool time_parse_cclk(const char *resp, int64_t *epoch_ms_utc_out)
 {
-    const char *p = strstr(resp, "+CCLK:");
-    if (p == NULL) {
-        return false;
-    }
-    p = strchr(p, '"');
-    if (p == NULL) {
-        return false;
-    }
-    p++;
-    int yy = 0;
-    int mo = 0;
-    int dd = 0;
-    int hh = 0;
-    int mi = 0;
-    int ss = 0;
-    if (sscanf(p, "%d/%d/%d,%d:%d:%d", &yy, &mo, &dd, &hh, &mi, &ss) != 6) {
-        return false;
-    }
-    if (yy < 100) {
-        yy += 2000;
-    }
-    /* Quarter-hour offset, e.g. "+22" = IST. Some operators omit it; this unit
-     * only ships in India, so assume IST rather than storing local time as UTC. */
-    int tz_q = NET_LTE_TZ_QUARTERS_IST;
-    const char *tzp = strrchr(p, '+');
-    if (tzp == NULL) {
-        tzp = strrchr(p, '-');
-        if (tzp != NULL) {
-            tz_q = -atoi(tzp + 1);
-        }
-    } else {
-        tz_q = atoi(tzp + 1);
-    }
-    int64_t epoch_ms = utc_datetime_to_epoch_ms(yy, mo, dd, hh, mi, ss);
-    if (epoch_ms < 0) {
-        return false;
-    }
-  /* Local = UTC + tz_q * 15 min → UTC = local - offset */
-    epoch_ms -= (int64_t)tz_q * 15LL * 60LL * 1000LL;
-    *epoch_ms_utc_out = epoch_ms;
-    return true;
+    return net_lte_time_parse_cclk(resp, epoch_ms_utc_out);
 }
 
 /** @brief One AT+CCLK? query; true when a usable time was parsed. */
@@ -613,7 +548,7 @@ static bool parse_qgpsloc(const char *resp, double *lat_out, double *lng_out)
         int mo = 0;
         int yy = 0;
         if (date_p != NULL && sscanf(date_p, "%2d%2d%2d", &dd, &mo, &yy) == 3) {
-            int64_t epoch_ms = utc_datetime_to_epoch_ms(yy + 2000, mo, dd, hh, mi, ss);
+            int64_t epoch_ms = net_lte_utc_datetime_to_epoch_ms(yy + 2000, mo, dd, hh, mi, ss);
             if (epoch_ms >= 0) {
                 time_apply_sync(epoch_ms, NET_LTE_TIME_GPS);
             }

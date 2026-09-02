@@ -25,6 +25,8 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .pill.live { color: var(--ok); border-color: rgba(61,220,151,.4); }
 .pill.down { color: var(--bad); border-color: rgba(255,92,92,.4); }
 .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.hint.warn { color: #b45309; background: #fffbeb; border: 1px solid #fcd34d; padding: 10px 12px; border-radius: 8px; }
+.hint[hidden] { display: none; }
 .row, .row2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .row2 > div { flex: 1; min-width: 120px; }
 label { display: block; color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
@@ -56,7 +58,18 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   word-break: break-all;
 }
 .scan-out { margin-top: 10px; font-size: 13px; color: var(--muted); }
-.scan-out a { color: var(--accent); cursor: pointer; text-decoration: none; display: block; margin: 4px 0; }
+.scan-out .scan-hint { margin-bottom: 6px; }
+.scan-out a {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  display: block;
+  margin: 4px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+}
+.scan-out a:hover { background: rgba(255, 255, 255, 0.06); }
 .tx { color: #ffb84d; }
 .rx { color: #ccc; }
 .sys { color: var(--muted); }

@@ -1,8 +1,8 @@
 # Fleet telemetry API — backend integration guide
 
 **Audience:** Backend / API developers consuming carrier uplink events  
-**Firmware source of truth:** `components/telemetry_uplink/uplink_payload.c`, `uplink_schema.h`  
-**Last updated:** 2026-09-02
+**Firmware source of truth:** `components/telemetry_uplink/uplink_payload.c`, `uplink_schema_ids.h`  
+**Last updated:** 2026-09-03
 
 ---
 
@@ -16,13 +16,13 @@
 | **Auth from device** | None today |
 | **Transport** | Quectel EC200U LTE modem (HTTPS via QHTTP AT) |
 
-The POST URL can be overridden per device in NVS (Carrier Console / serial). OBD `schemaId` defaults to `1087` and can also be overridden in NVS (`uplink schema`). Host and GPS schema IDs are defined in firmware (`uplink_schema.h`).
+The POST URL can be overridden per device in NVS (Carrier Console / serial). OBD `schemaId` defaults to `1087` and can also be overridden in NVS (`uplink schema`). Host and GPS schema IDs are compile-time (`uplink_schema_ids.h`).
 
 ---
 
 ## Event envelope (all types)
 
-Each uplink item uses the same top-level envelope. Identity, schema, and time sit **outside** `payload`:
+Every item uses the same top-level envelope. Identity, schema, and time sit **outside** `payload`:
 
 ```json
 {
@@ -30,75 +30,75 @@ Each uplink item uses the same top-level envelope. Identity, schema, and time si
   "node_id": "node-042",
   "schemaId": "1087",
   "ts_ms": 1710000001000,
-  "payload": { ... }
+  "payload": { }
 }
 ```
 
-### Mandatory envelope fields (every event)
+### Mandatory envelope fields
 
 | Field | Required | Notes |
 |-------|----------|--------|
-| `device_id` | **Yes** | Non-empty string; carrier, virtual `gps-*`, or host id |
-| `node_id` | **Yes** | Non-empty string; paired with `device_id` |
-| `schemaId` | **Yes** | Non-empty; `1087` / `1088` / `1089` (see `uplink_schema_ids.h`) |
-| `ts_ms` | **Yes** | Always present; UTC epoch ms when LTE time synced, else uptime ms |
-| `payload` | **Yes** | Domain data only — identity/time are **not** duplicated inside |
+| `device_id` | **Yes** | Carrier, virtual `gps-*`, or host id (e.g. `ul212-001`) |
+| `node_id` | **Yes** | Paired with `device_id` |
+| `schemaId` | **Yes** | `1087` / `1088` / `1089` |
+| `ts_ms` | **Yes** | **UTC** Unix epoch milliseconds when LTE/GPS time is synced; else device uptime ms. Convert to IST (`UTC+5:30`) only for display in India — do not store IST as a fake epoch. |
 
-Firmware rejects building or serializing an event if any of `device_id`, `node_id`, or `schemaId` is missing/empty. Uplink is blocked until carrier `device_id` + `node_id` are provisioned (NVS).
+| `payload` | **Yes** | Domain data only — do **not** expect identity/time inside |
 
-| Field | Description |
-|-------|-------------|
-| `device_id` | Event source identity (carrier, virtual GPS device, or sensor host) |
-| `node_id` | Secondary node identity for the same event source |
-| `schemaId` | Trafyn schema — determines `payload` shape |
-| `ts_ms` | Capture time — **UTC epoch ms** when LTE time is synced; otherwise device uptime ms |
-| `payload` | Domain-specific fields only |
+Uplink is blocked until the carrier is provisioned with `device_id` + `node_id` (NVS).
 
 ---
 
-## Schema IDs (firmware defaults)
+## Schema IDs
 
-| schemaId | Type | `device_id` example |
-|----------|------|---------------------|
-| `1087` | OBD / vehicle telemetry | `carrier-042` (provisioned) |
-| `1088` | Host sensor reading (UL212, `host_type_id` 1) | `ul212-001` |
-| `1089` | GNSS position | `gps-042` (virtual, derived from carrier) |
+| schemaId | Type | `device_id` example | `node_id` example |
+|----------|------|---------------------|-------------------|
+| `1087` | OBD / vehicle telemetry | `carrier-042` | `node-042` |
+| `1088` | Zigbee host snapshot (UL212) | `ul212-001` | `node-ul212-001` |
+| `1089` | GNSS | `gps-042` | `node-gps-042` |
 
-Schema map source: `components/telemetry_uplink/uplink_schema.c`. **Edit schema numbers in `components/telemetry_uplink/include/uplink_schema_ids.h` before build/OTA.**
+Edit numbers in `components/telemetry_uplink/include/uplink_schema_ids.h` before build/OTA.
 
 ---
 
-## Request body shapes
+## One object vs list of objects
 
-### Live POST (no SD card)
-
-- **One event** → single JSON object (envelope above)
-- **Multiple events** from one tick → JSON array of envelopes
-
-### Batch POST (SD queue drain)
-
-Always a JSON array of envelopes (one SD queue line per event):
-
-```json
-[
-  { "device_id": "carrier-042", "node_id": "node-042", "schemaId": "1087", "ts_ms": ..., "payload": { ... } },
-  { "device_id": "gps-042", "node_id": "node-gps-042", "schemaId": "1089", "ts_ms": ..., "payload": { ... } },
-  { "device_id": "ul212-001", "node_id": "node-ul212-001", "schemaId": "1088", "ts_ms": ..., "payload": { ... } }
-]
-```
-
-**Parsing rule:**
+**Always normalize on ingest:**
 
 ```javascript
 const body = await request.json();
 const events = Array.isArray(body) ? body : [body];
 ```
 
-Return **HTTP 2xx** only on successful ingest. The device keeps queued SD lines until drain gets 2xx.
+| Path | Body shape | When |
+|------|------------|------|
+| **Live POST** | **Single JSON object** | Exactly **one** event this tick (e.g. only GPS, or only one host, or only OBD) |
+| **Live POST** | **JSON array** of envelopes | **Two or more** events this tick (typical: OBD + GPS + UL212) |
+| **SD batch drain** | **Always JSON array** | Offline queue flush — one or many events |
+
+### What can appear in one tick
+
+A single produce tick may emit **0..N** events (capped at 12):
+
+| Event | Condition |
+|-------|-----------|
+| `1087` OBD | At least one PID is fresh (≤15 s) **and** OBD included this tick |
+| `1089` GPS | GNSS fix (`gps_ok`) **and** GPS worth sending |
+| `1088` host | One event **per Zigbee host** that has ≥1 valid reading |
+
+So:
+
+- Truck + GPS + one UL212 → usually a **3-element array**
+- Only UL212 online, no fresh OBD/GPS → **one object** (`1088`)
+- Bench, no CAN, GPS heartbeat only → **one object** (`1089`) or array if multiple hosts
+
+Return **HTTP 2xx** only on successful ingest. The device keeps SD queue lines until drain gets 2xx.
 
 ---
 
-## Sample — one uplink tick (OBD + GPS + host reading)
+## Full sample body (list) — share with backend
+
+Typical live/batch POST when the vehicle has OBD, GPS fix, and one UL212 fuel host:
 
 ```json
 [
@@ -116,14 +116,26 @@ Return **HTTP 2xx** only on successful ingest. The device keeps queued SD lines 
       "cmds_fail": 3,
       "blocked_cmds": 0,
       "telemetry_drops": 0,
-      "rpm": 790.0,
+      "rpm": 790,
       "rpm_raw_hex": "410C0C31",
       "rpm_age_ms": 80,
       "rpm_ok": true,
-      "speed_ok": false,
-      "coolant_ok": false,
-      "throttle_ok": false,
-      "voltage_ok": false,
+      "speed_kmh": 0,
+      "speed_raw_hex": "410D00",
+      "speed_age_ms": 90,
+      "speed_ok": true,
+      "coolant_c": 84,
+      "coolant_raw_hex": "41057C",
+      "coolant_age_ms": 120,
+      "coolant_ok": true,
+      "throttle_pct": 12.5,
+      "throttle_raw_hex": "411120",
+      "throttle_age_ms": 100,
+      "throttle_ok": true,
+      "voltage_v": 13.8,
+      "voltage_raw": "13.8",
+      "voltage_age_ms": 200,
+      "voltage_ok": true,
       "source": "esp32_obd"
     }
   },
@@ -144,22 +156,49 @@ Return **HTTP 2xx** only on successful ingest. The device keeps queued SD lines 
     "schemaId": "1088",
     "ts_ms": 1710000001000,
     "payload": {
-      "key": "height_mm",
-      "value": 40.5,
-      "unit": "mm",
-      "valid": true
+      "host_type": "ul212_ble_fetch",
+      "height_mm": 130.7,
+      "height_mm_unit": "mm",
+      "smooth_mm": 131.5,
+      "smooth_mm_unit": "mm",
+      "temperature_c": 33.2,
+      "temperature_c_unit": "C",
+      "signal": 90,
+      "valid_echo": 1,
+      "tilt_deg": 3
     }
   }
 ]
 ```
 
-Each valid host reading emits its own `1088` event. A UL212 reporting six valid readings can produce six events in the same tick.
+### Sample — single object (live POST with only one event)
+
+```json
+{
+  "device_id": "ul212-001",
+  "node_id": "node-ul212-001",
+  "schemaId": "1088",
+  "ts_ms": 1710000001100,
+  "payload": {
+    "host_type": "ul212_ble_fetch",
+    "height_mm": 130.7,
+    "height_mm_unit": "mm",
+    "smooth_mm": 131.5,
+    "smooth_mm_unit": "mm",
+    "temperature_c": 33.2,
+    "temperature_c_unit": "C",
+    "signal": 90,
+    "valid_echo": 1,
+    "tilt_deg": 3
+  }
+}
+```
 
 ---
 
-## Sample — bench / no vehicle (OBD event with no fresh PIDs)
+## Sample — bench / no vehicle (sparse OBD)
 
-When no CAN ECU is connected, the carrier may still emit an OBD-schema event with all `*_ok: false` and no numeric PID fields:
+When CAN is down, numeric PID fields are omitted; `*_ok` flags are still sent as `false`. An OBD event is only emitted if **at least one** PID is fresh — otherwise the tick may contain only GPS and/or host events.
 
 ```json
 {
@@ -186,103 +225,100 @@ When no CAN ECU is connected, the carrier may still emit an OBD-schema event wit
 }
 ```
 
-Note: OBD events are only emitted when at least one PID is fresh (≤15 s). Bench units with no CAN may emit GPS or host events only.
-
 ---
 
 ## Payload field reference
 
-### Schema 1087 — OBD (`payload`)
+### Schema 1087 — OBD
 
 | Field | Type | Notes |
 |-------|------|--------|
-| `obd_profile` | string | Active poll profile |
-| `obd_protocol` | string | e.g. `ISO15765-4 CAN11/500` or `unknown` |
-| `uptime_seconds` | uint32 | Device uptime |
-| `poller_status` | string | `"on"` or `"paused"` |
-| `cmds_ok`, `cmds_fail`, `blocked_cmds`, `telemetry_drops` | uint64 | Runtime counters |
-| `rpm_ok` … `voltage_ok` | bool | **Always sent** for all five PIDs |
-| `rpm`, `speed_kmh`, etc. | varies | Only when corresponding `*_ok` is `true` (fresh ≤15 s) |
+| `obd_profile` | string | Active poll profile (e.g. `fleet_basic`) |
+| `obd_protocol` | string | e.g. `ISO15765-4 CAN11/500` or `unknown` / `none` |
+| `uptime_seconds` | uint32 | Carrier uptime |
+| `poller_status` | string | `"on"` / `"paused"` (may also appear as running/paused in logs) |
+| `cmds_ok`, `cmds_fail`, `blocked_cmds`, `telemetry_drops` | uint64 | Counters |
+| `rpm_ok`, `speed_ok`, `coolant_ok`, `throttle_ok`, `voltage_ok` | bool | Always present |
+| `rpm`, `speed_kmh`, `coolant_c`, `throttle_pct`, `voltage_v` | number | Only when matching `*_ok` is true (fresh ≤15 s) |
+| `*_raw_hex` / `voltage_raw`, `*_age_ms` | string / uint | Only when that PID is fresh |
 | `source` | string | Always `"esp32_obd"` |
 
-GPS and host data are **not** in schema 1087 — they are separate events.
+GPS and host data are **not** nested in 1087.
 
-### Schema 1089 — GPS (`payload`)
+### Schema 1089 — GPS
 
 | Field | When |
 |-------|------|
 | `gps_ok` | Always |
 | `lat`, `lng` | Only when `gps_ok == true` |
 
-Virtual identity: `device_id` = `gps-{suffix}`, `node_id` = `node-gps-{suffix}` where suffix is the part after the last `-` in the carrier `device_id` (e.g. `carrier-042` → `gps-042`).
+Virtual ids: suffix after last `-` of carrier `device_id` → `gps-{suffix}` / `node-gps-{suffix}`.
 
-### Schema 1088 — Host reading (`payload`)
+### Schema 1088 — Host snapshot (bundled) — **updated 2026-09-03**
 
-One reading per event:
+**One event per Zigbee host** per tick. All **valid** readings are flat keys on `payload` (not one event per key).
 
 | Field | Type | Notes |
 |-------|------|--------|
-| `key` | string | e.g. `height_mm`, `signal` |
-| `value` | number | Reading value |
-| `unit` | string | May be empty |
-| `valid` | bool | Only `valid: true` readings are uplinked |
+| `host_type` | string | e.g. `ul212_ble_fetch` |
+| `{key}` | number | e.g. `height_mm`, `tilt_deg` — only if that reading is valid |
+| `{key}_unit` | string | Present only when the reading has a non-empty unit |
 
-Host `device_id` is the sensor's provisioned id (e.g. `ul212-001`). Host `node_id` is derived as `node-{host_device_id}`. `ts_ms` is the carrier's tick time (not the host's own clock), so every event in a batch shares one time base.
+Host `device_id` = provisioned host id. Host `node_id` = `node-{host_device_id}`.  
+`ts_ms` = **carrier tick time** (shared time base for the batch).
 
-A host that stops reporting for more than 2 minutes drops out of the uplink entirely, so stale readings are never re-sent as if fresh.
+A host quiet for >2 minutes is dropped from uplink so stale values are not re-sent.
 
-### UL212 reading keys (`host_type_id: 1`)
+### UL212 keys (`host_type_id: 1`)
 
-| key | unit |
-|-----|------|
-| `height_mm` | mm |
-| `smooth_mm` | mm |
-| `temperature_c` | C |
-| `signal` | (none) |
-| `valid_echo` | (none) |
-| `tilt_deg` | (none) |
+| key | typical unit field |
+|-----|--------------------|
+| `height_mm` | `height_mm_unit`: `"mm"` |
+| `smooth_mm` | `smooth_mm_unit`: `"mm"` |
+| `temperature_c` | `temperature_c_unit`: `"C"` |
+| `signal` | (no unit) |
+| `valid_echo` | (no unit) |
+| `tilt_deg` | (no unit) |
 
 ---
 
 ## Wall-clock time (`ts_ms`)
 
-When the EC200U LTE modem is up, firmware syncs **UTC epoch milliseconds**:
+`ts_ms` is always a **UTC epoch** (milliseconds since 1970-01-01 UTC). The carrier gets wall clock from the EC200U 4G modem — no public HTTP time API:
 
-| Priority | Source | When | Extra AT load |
-|----------|--------|------|----------------|
-| 1 | `+QGPSLOC` UTC+date | GNSS fix — piggybacks the existing GPS poll | None |
-| 2 | `AT+CCLK?` network time | Works indoors; every 60 s until synced, then every 30 min | 1 AT command |
-| 3 | `esp_timer` uptime | Before the first sync | None |
+| Priority | Source | Notes |
+|----------|--------|--------|
+| 1 | GNSS UTC | From `AT+QGPSLOC` when a fix is available (preferred) |
+| 2 | `AT+CCLK?` | Network/NITZ time; India operators report IST as Quectel `+22` (UTC+5:30). If the TZ field is omitted, firmware assumes IST. |
+| 3 | ESP uptime ms | Before first successful sync |
 
-GPS is unambiguous UTC, so once GPS has set the clock, CCLK will not move it.
+**India display:** `IST = UTC + 5:30`. Example: `ts_ms = 1773997200000` → `2026-03-20 14:30:00 IST`. Serial console `lte` prints both `utc_ms` and `ist="..."`.
 
-India (IST): `+CCLK` reports timezone `+22` (UTC+5:30). If an operator omits the timezone field, firmware assumes IST rather than storing local time as UTC. Values outside 2025–2100 are rejected, so an unregistered modem's 1980 default is ignored.
-
-Between syncs the clock is extrapolated from the ESP32 monotonic timer, so there is no per-tick AT traffic.
-
-**Backend note:** `ts_ms` is UTC epoch ms only after sync. Until then it is a small uptime value (e.g. `3605000`). Treat any `ts_ms` below `1735689600000` (2025-01-01) as "device clock not yet synced" and fall back to your own receive time.
+Treat `ts_ms` below `1735689600000` (2025-01-01) as “clock not synced yet”; prefer receive time.
 
 ---
 
-1. **Parse envelope** — `device_id`, `node_id`, `schemaId`, `ts_ms`, `payload` at top level.
-2. **Route by `schemaId`** — `1087` OBD, `1088` host reading, `1089` GPS.
-3. **Handle single object or array** on live POST.
-4. **Index OBD** by `(device_id, ts_ms)`.
-5. **Index GPS** by virtual `device_id` or correlate to carrier via suffix.
-6. **Index host readings** by `(host device_id, ts_ms, payload.key)`.
-7. **Do not conflate ids** — carrier `device_id`, virtual `gps-*`, and host `ul212-*` are separate namespaces.
+## Backend ingest checklist
+
+1. Parse envelope: `device_id`, `node_id`, `schemaId`, `ts_ms`, `payload`.
+2. Normalize body: `Array.isArray(body) ? body : [body]`.
+3. Route by `schemaId`: `1087` / `1088` / `1089`.
+4. Index OBD by `(device_id, ts_ms)`.
+5. Index GPS by virtual `device_id` (or correlate carrier via suffix).
+6. Index host by `(device_id, ts_ms)` — metrics are **columns/keys on payload**, not `payload.key`.
+7. Keep namespaces separate: carrier ≠ `gps-*` ≠ `ul212-*`.
 
 ---
 
-## Differences from previous format (pre-2026-09)
+## Breaking change vs earlier 1088 format
 
-| Old | New |
-|-----|-----|
-| One fat `1087` event with GPS + `hosts[]` nested in `payload` | Multiple typed events per tick |
-| `device_id` / `node_id` inside `payload` | Identity at envelope level |
-| `schemaId` only at HTTP wrapper | `schemaId` on every event |
-| `schema_version` in payload | Removed — use per-event `schemaId` |
-| `hosts[]` array | One `1088` event per valid reading |
+| Before (early Sep 2026) | Now (2026-09-03) |
+|-------------------------|------------------|
+| One `1088` event **per reading** | One `1088` event **per host** |
+| `payload: { key, value, unit, valid }` | `payload: { host_type, height_mm, tilt_deg, … }` |
+| Six UL212 metrics → six events | Six valid metrics → **one** event |
+
+Do **not** expect `payload.key` / `payload.value` for new firmware.
 
 ---
 
@@ -291,40 +327,35 @@ Between syncs the clock is extrapolated from the ESP32 monotonic timer, so there
 | Path | Purpose |
 |------|---------|
 | `components/telemetry_uplink/uplink_payload.c` | JSON builders |
-| `components/telemetry_uplink/include/uplink_schema_ids.h` | **Schema ID numbers (edit before build)** |
-| `components/telemetry_uplink/uplink_schema.c` | Host type → schema lookup table |
-| `hardware/fleet_telematics_carrier/host/*/host.manifest.json` | Host reading catalog |
+| `components/telemetry_uplink/include/uplink_schema_ids.h` | Schema ID numbers |
+| `components/telemetry_uplink/uplink_schema.c` | Host type → schema |
 | `docs/fleet-zigbee-host-guide.md` | Zigbee host onboarding |
 | `tools/carrier_console/` | PC provisioning UI |
 
 ---
 
-## Quick curl test
+## Quick curl test (single object)
 
 ```bash
 curl -sS -X POST 'https://api.trafyn.info/nc-events-api/v2/messages' \
   -H 'Content-Type: application/json' \
   -d @- <<'EOF'
 {
-  "device_id": "carrier-test-001",
-  "node_id": "node-test-001",
-  "schemaId": "1087",
-  "ts_ms": 1710000000123,
+  "device_id": "ul212-001",
+  "node_id": "node-ul212-001",
+  "schemaId": "1088",
+  "ts_ms": 1710000001100,
   "payload": {
-    "obd_profile": "fleet_basic",
-    "obd_protocol": "unknown",
-    "uptime_seconds": 60,
-    "poller_status": "paused",
-    "cmds_ok": 0,
-    "cmds_fail": 0,
-    "blocked_cmds": 0,
-    "telemetry_drops": 0,
-    "rpm_ok": false,
-    "speed_ok": false,
-    "coolant_ok": false,
-    "throttle_ok": false,
-    "voltage_ok": false,
-    "source": "esp32_obd"
+    "host_type": "ul212_ble_fetch",
+    "height_mm": 130.7,
+    "height_mm_unit": "mm",
+    "smooth_mm": 131.5,
+    "smooth_mm_unit": "mm",
+    "temperature_c": 33.2,
+    "temperature_c_unit": "C",
+    "signal": 90,
+    "valid_echo": 1,
+    "tilt_deg": 3
   }
 }
 EOF

@@ -34,7 +34,7 @@ extern "C" {
  */
 #define UPLINK_URL "https://api.trafyn.info/nc-events-api/v2/messages"
 
-/* 1 OBD + 1 GPS + host readings. Excess readings roll into the next tick. */
+/* 1 OBD + 1 GPS + 1 event per Zigbee host (all readings bundled). */
 #define UPLINK_MAX_EVENTS_PER_TICK 12
 
 typedef struct {
@@ -138,8 +138,12 @@ void uplink_host_node_id(const char *host_device_id, char *node_id, size_t node_
 
 int uplink_payload_build_obd_payload(const uplink_snapshot_t *snap, char *out, size_t out_len);
 int uplink_payload_build_gps_payload(const uplink_snapshot_t *snap, char *out, size_t out_len);
+/** @brief Single reading object (legacy / tests). Prefer host report for live uplink. */
 int uplink_payload_build_host_reading_payload(const uplink_host_reading_t *reading, char *out,
                                               size_t out_len);
+/** @brief One host → one payload with all valid readings as flat keys. */
+int uplink_payload_build_host_report_payload(const uplink_host_report_t *host, char *out,
+                                             size_t out_len);
 
 int uplink_events_from_snapshot(const uplink_snapshot_t *snap, const uplink_emit_ctx_t *ctx,
                                 uplink_event_t *out, uint8_t max_out, uint8_t *count);

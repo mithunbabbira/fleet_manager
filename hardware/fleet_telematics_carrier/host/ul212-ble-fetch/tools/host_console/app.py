@@ -3,7 +3,7 @@
 
     pip install -r tools/host_console/requirements.txt
     python3 tools/host_console/app.py
-    python3 tools/host_console/app.py --port /dev/cu.usbmodem1201
+    python3 tools/host_console/app.py --port /dev/cu.usbmodem1101
 
 Opens http://127.0.0.1:8765 — ESP32 stays serial-only; all UI runs on the PC.
 """
@@ -18,20 +18,48 @@ import signal
 import threading
 import time
 import webbrowser
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import serial
 import serial.tools.list_ports
+import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-import uvicorn
 
 BAUD = 115200
 STATIC = Path(__file__).resolve().parent / "static"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_HTTP = 8765
+
+HOST_USB_SN = "58:E6:C5:DB:7B:D4"
+CARRIER_USB_SN = "10:BD:A3:96:5A:0C"
+
+
+def port_serial_number(port: str) -> str | None:
+    for p in serial.tools.list_ports.comports():
+        if p.device == port:
+            return p.serial_number
+    return None
+
+
+def assert_host_port(port: str) -> None:
+    sn = port_serial_number(port)
+    if sn == CARRIER_USB_SN:
+        raise RuntimeError(
+            f"{port} is the fleet carrier (SN {CARRIER_USB_SN}). "
+            "Use Carrier Console there; Host Console needs "
+            f"SN {HOST_USB_SN}."
+        )
+
+
+def find_port_by_sn(serial_number: str) -> str | None:
+    for p in serial.tools.list_ports.comports():
+        if p.serial_number == serial_number:
+            return p.device
+    return None
 
 
 class SerialBridge:
@@ -58,14 +86,39 @@ class SerialBridge:
         self._loop = loop
 
     def connect(self, port: str) -> None:
+        assert_host_port(port)
         self.disconnect()
         with self._lock:
-            self._ser = serial.Serial(port, BAUD, timeout=0.15)
+            # Keep DTR/RTS low so opening USB does not reset the chip.
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = BAUD
+            ser.timeout = 0.15
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+            try:
+                ser.dtr = False
+                ser.rts = False
+            except Exception:
+                pass
+            time.sleep(0.1)
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
+            self._ser = ser
             self._port = port
             self._stop.clear()
             self._reader = threading.Thread(target=self._read_loop, daemon=True)
             self._reader.start()
-        self._schedule_broadcast({"type": "system", "line": f"Connected to {port} @ {BAUD}"})
+        self._schedule_broadcast({"type": "clear_log"})
+        self._schedule_broadcast(
+            {
+                "type": "system",
+                "line": f"Connected to {port} @ {BAUD} (host SN {port_serial_number(port) or '?'})",
+            }
+        )
 
     def disconnect(self) -> None:
         self._stop.set()
@@ -134,12 +187,16 @@ class SerialBridge:
 
 
 bridge = SerialBridge()
-app = FastAPI(title="UL212 Host Console", docs_url=None, redoc_url=None)
 
 
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     bridge.set_loop(asyncio.get_running_loop())
+    yield
+    bridge.disconnect()
+
+
+app = FastAPI(title="UL212 Host Console", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.get("/")
@@ -151,8 +208,14 @@ async def index() -> FileResponse:
 async def list_ports() -> dict[str, list[dict[str, str]]]:
     ports = []
     for p in serial.tools.list_ports.comports():
-        ports.append({"device": p.device, "description": p.description or p.device})
-    return {"ports": ports}
+        ports.append(
+            {
+                "device": p.device,
+                "description": p.description or p.device,
+                "serial_number": p.serial_number or "",
+            }
+        )
+    return {"ports": ports, "host_usb_sn": HOST_USB_SN, "carrier_usb_sn": CARRIER_USB_SN}
 
 
 @app.get("/api/connection")
@@ -229,8 +292,16 @@ def main() -> None:
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    if args.port:
-        threading.Timer(1.0, lambda: bridge.connect(args.port)).start()
+    port = args.port or find_port_by_sn(HOST_USB_SN)
+    if port:
+        def _auto() -> None:
+            try:
+                bridge.connect(port)
+            except Exception as exc:
+                print(f"Host auto-connect failed: {exc}")
+
+        threading.Timer(1.0, _auto).start()
+        print(f"Will auto-connect host port {port}")
 
     url = f"http://{args.host}:{args.http_port}/"
     if not args.no_browser:

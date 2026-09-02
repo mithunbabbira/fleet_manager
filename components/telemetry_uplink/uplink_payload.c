@@ -320,6 +320,59 @@ int uplink_payload_build_host_reading_payload(const uplink_host_reading_t *readi
     return (int)off;
 }
 
+int uplink_payload_build_host_report_payload(const uplink_host_report_t *host, char *out,
+                                             size_t out_len)
+{
+    if (!host || !out || out_len < 32 || host->device_id[0] == '\0') {
+        return -1;
+    }
+
+    bool any = false;
+    for (uint8_t ri = 0; ri < host->reading_count && ri < UPLINK_MAX_HOST_READINGS; ri++) {
+        if (host->readings[ri].valid && host->readings[ri].key[0] != '\0') {
+            any = true;
+            break;
+        }
+    }
+    if (!any) {
+        return -1;
+    }
+
+    size_t off = 0;
+    out[0] = '\0';
+    if (append(out, out_len, &off, "{") != 0) {
+        return -1;
+    }
+    if (append(out, out_len, &off, "\"host_type\":") != 0 ||
+        append_json_str(out, out_len, &off, host->host_type) != 0) {
+        return -1;
+    }
+
+    for (uint8_t ri = 0; ri < host->reading_count && ri < UPLINK_MAX_HOST_READINGS; ri++) {
+        const uplink_host_reading_t *r = &host->readings[ri];
+        if (!r->valid || r->key[0] == '\0') {
+            continue;
+        }
+        /* Flat metric keys: "height_mm":130.7 — cloud schemas map by key name. */
+        if (appendf(out, out_len, &off, ",\"%s\":%.4g", r->key, r->value) != 0) {
+            return -1;
+        }
+        if (r->unit[0] != '\0') {
+            char unit_key[40];
+            snprintf(unit_key, sizeof(unit_key), "%s_unit", r->key);
+            if (appendf(out, out_len, &off, ",\"%s\":", unit_key) != 0 ||
+                append_json_str(out, out_len, &off, r->unit) != 0) {
+                return -1;
+            }
+        }
+    }
+
+    if (append(out, out_len, &off, "}") != 0) {
+        return -1;
+    }
+    return (int)off;
+}
+
 static const char *obd_schema_or_default(const char *schema_id)
 {
     if (schema_id != NULL && schema_id[0] != '\0') {
@@ -391,24 +444,17 @@ int uplink_events_from_snapshot(const uplink_snapshot_t *snap, const uplink_emit
         if (host_schema == NULL || h->device_id[0] == '\0') {
             continue;
         }
+        if (*count >= max_out) {
+            return 0; /* Cap reached — send what we have; rest arrive next tick. */
+        }
         char host_node[48];
         uplink_host_node_id(h->device_id, host_node, sizeof(host_node));
-        for (uint8_t ri = 0; ri < h->reading_count && ri < UPLINK_MAX_HOST_READINGS; ri++) {
-            const uplink_host_reading_t *r = &h->readings[ri];
-            if (!r->valid || r->key[0] == '\0') {
-                continue;
-            }
-            if (*count >= max_out) {
-                return 0; /* Cap reached — send what we have; rest arrive next tick. */
-            }
-            char payload[256];
-            /* Carrier tick time, not the host's own uptime clock — every event
-             * in a batch must share one comparable time base. */
-            if (uplink_payload_build_host_reading_payload(r, payload, sizeof(payload)) > 0 &&
-                fill_event(&out[*count], h->device_id, host_node, host_schema, snap->ts_ms,
-                           payload) == 0) {
-                (*count)++;
-            }
+        char payload[512];
+        /* One 1088 event per host with height/smooth/temp/signal/tilt bundled. */
+        if (uplink_payload_build_host_report_payload(h, payload, sizeof(payload)) > 0 &&
+            fill_event(&out[*count], h->device_id, host_node, host_schema, snap->ts_ms,
+                       payload) == 0) {
+            (*count)++;
         }
     }
 
