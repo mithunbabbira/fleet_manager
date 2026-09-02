@@ -1,5 +1,6 @@
 #include "telemetry_uplink.h"
 #include "uplink_payload.h"
+#include "uplink_schema.h"
 
 #include "can_obd.h"
 #include "esp_log.h"
@@ -48,8 +49,8 @@ static const char *TAG = "uplink";
 #define UPLINK_DRAIN_STACK 8192
 #define UPLINK_TASK_PRIO 4
 #define UPLINK_CACHE_TASK_STACK 3072
-#define PAYLOAD_BUF_LEN 1800
-#define EVENT_BUF_LEN 1900
+#define EVENT_BUF_LEN 1024
+#define LIVE_BUF_LEN 8192
 #define BATCH_BUF_LEN 13000
 #define PEEK_BUF_LEN 12000
 
@@ -66,6 +67,7 @@ static char s_schema_id[16];
 static telemetry_uplink_last_t s_last;
 static char s_drain_err[80];
 static SemaphoreHandle_t s_mu;
+/* Serializes produce/drain (shared static JSON buffers + modem access). */
 static SemaphoreHandle_t s_io_mu;
 static QueueHandle_t s_q;
 static TaskHandle_t s_cache_task;
@@ -85,11 +87,17 @@ static telemetry_pid_sample_t s_voltage;
 static bool s_have_rpm, s_have_speed, s_have_coolant, s_have_throttle, s_have_voltage;
 
 static uplink_host_report_t s_hosts[UPLINK_MAX_HOSTS];
+/* Carrier-side receive time per host; host ts_ms uses the host's own clock. */
+static uint64_t s_host_rx_ms[UPLINK_MAX_HOSTS];
 static uint8_t s_host_count;
+
+/* Stop uploading a host's readings once it goes quiet this long. */
+#define UPLINK_HOST_FRESH_MS 120000ULL
 
 /**
  * @brief Monotonic ms since boot.
- * @note Age/freshness math must use this — bus samples share this clock.
+ * @note All age/freshness math must use this — telemetry_bus samples are
+ *       stamped with the same clock, and it never jumps when time syncs.
  */
 static uint64_t now_ms(void)
 {
@@ -338,6 +346,7 @@ static void store_host_report(const telemetry_host_report_t *rep)
     }
     for (uint8_t i = 0; i < s_host_count; i++) {
         if (strcmp(s_hosts[i].device_id, rep->device_id) == 0) {
+            s_host_rx_ms[i] = now_ms();
             s_hosts[i].host_type_id = rep->host_type_id;
             snprintf(s_hosts[i].host_type, sizeof(s_hosts[i].host_type), "%s", rep->host_type);
             s_hosts[i].ts_ms = rep->ts_ms;
@@ -356,10 +365,21 @@ static void store_host_report(const telemetry_host_report_t *rep)
             return;
         }
     }
+    uint8_t slot;
     if (s_host_count >= UPLINK_MAX_HOSTS) {
-        return;
+        /* Full: reuse the least-recently-heard slot instead of ignoring the
+         * new host until reboot. */
+        slot = 0;
+        for (uint8_t i = 1; i < UPLINK_MAX_HOSTS; i++) {
+            if (s_host_rx_ms[i] < s_host_rx_ms[slot]) {
+                slot = i;
+            }
+        }
+    } else {
+        slot = s_host_count++;
     }
-    uplink_host_report_t *h = &s_hosts[s_host_count++];
+    s_host_rx_ms[slot] = now_ms();
+    uplink_host_report_t *h = &s_hosts[slot];
     memset(h, 0, sizeof(*h));
     snprintf(h->device_id, sizeof(h->device_id), "%s", rep->device_id);
     snprintf(h->host_type, sizeof(h->host_type), "%s", rep->host_type);
@@ -467,12 +487,15 @@ static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config
     fill_pid_view(&snap->coolant, s_have_coolant, &s_coolant, now);
     fill_pid_view(&snap->throttle, s_have_throttle, &s_throttle, now);
     fill_pid_view(&snap->voltage, s_have_voltage, &s_voltage, now);
-    snap->host_count = s_host_count;
-    if (snap->host_count > UPLINK_MAX_HOSTS) {
-        snap->host_count = UPLINK_MAX_HOSTS;
-    }
-    for (uint8_t i = 0; i < snap->host_count; i++) {
-        snap->hosts[i] = s_hosts[i];
+    /* Only carry hosts still reporting — a dead host must not keep re-uploading
+     * its last reading every tick. */
+    snap->host_count = 0;
+    for (uint8_t i = 0; i < s_host_count && i < UPLINK_MAX_HOSTS; i++) {
+        uint64_t rx = s_host_rx_ms[i];
+        if (rx == 0 || now < rx || (now - rx) > UPLINK_HOST_FRESH_MS) {
+            continue;
+        }
+        snap->hosts[snap->host_count++] = s_hosts[i];
     }
     xSemaphoreGive(s_mu);
 
@@ -505,8 +528,9 @@ static esp_err_t build_snapshot(uplink_snapshot_t *snap, telemetry_uplink_config
 
 /**
  * @brief Produce tick: gates → JSON → SD enqueue or live POST.
- * @note Callers must hold s_io_mu. OTA busy only blocks live modem POST; SD
- *       enqueue still runs so samples accumulate while LTE OTA holds the UART.
+ * @note OTA busy only blocks live modem POST; SD enqueue still runs so samples
+ *       accumulate while LTE OTA holds the UART.
+ * @note Callers must hold s_io_mu (see produce_once).
  */
 static esp_err_t produce_once_locked(void)
 {
@@ -528,56 +552,75 @@ static esp_err_t produce_once_locked(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* CAN/OBD optional: GPS-only ticks still queue so the truck location is known. */
-    if (!uplink_should_enqueue(have_fresh, snap.gps_ok) && snap.host_count == 0) {
-        set_last(false, true, 0, "no pid or gps", "");
+    snap.ts_ms = event_ts_ms();
+
+    bool gps_worth = true;
+    if (!have_fresh && snap.gps_ok) {
+        gps_worth = uplink_gps_only_worth_sending(s_have_gps_last, s_last_gps_lat, s_last_gps_lng,
+                                                  s_last_gps_ms, snap.lat, snap.lng, snap.ts_ms);
+    }
+    if (!uplink_tick_worth_producing(have_fresh, snap.gps_ok, gps_worth, &snap)) {
+        set_last(false, true, 0, "no events", "");
         return ESP_ERR_INVALID_STATE;
     }
 
-    snap.ts_ms = event_ts_ms();
-    if (!have_fresh && snap.gps_ok) {
-        if (!uplink_gps_only_worth_sending(s_have_gps_last, s_last_gps_lat, s_last_gps_lng,
-                                           s_last_gps_ms, snap.lat, snap.lng, now_ms())) {
-            set_last(false, true, 0, "gps stationary", "");
-            return ESP_ERR_INVALID_STATE;
-        }
-    }
-
-    static char payload[PAYLOAD_BUF_LEN];
-    int pn = uplink_payload_build_payload(&snap, payload, sizeof(payload));
-    if (pn < 0) {
+    uplink_emit_ctx_t emit = {
+        .include_obd = have_fresh,
+        .include_gps = snap.gps_ok && (have_fresh || gps_worth),
+        .obd_schema_id = s_schema_id,
+    };
+    /* Static: ~10 KB would blow the task stack. Serialized by s_io_mu. */
+    static uplink_event_t events[UPLINK_MAX_EVENTS_PER_TICK];
+    uint8_t event_count = 0;
+    if (uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                    &event_count) != 0 ||
+        event_count == 0) {
         set_last(false, true, 0, "json build fail", "");
         return ESP_FAIL;
     }
 
     if (store_sd_is_mounted()) {
         static char event[EVENT_BUF_LEN];
-        int en = uplink_payload_build_queued_event(payload, now_ms(), event, sizeof(event));
-        if (en < 0) {
+        uint64_t queued_at = now_ms();
+        uint8_t queued = 0;
+        bool enqueue_failed = false;
+        for (uint8_t i = 0; i < event_count; i++) {
+            int en =
+                uplink_event_serialize_queued(&events[i], queued_at, event, sizeof(event));
+            if (en < 0) {
+                ESP_LOGW(TAG, "skipped oversized event %u", (unsigned)i);
+                continue;
+            }
+            if (store_sd_enqueue_line(event, (size_t)en) != ESP_OK) {
+                enqueue_failed = true;
+                break;
+            }
+            queued++;
+        }
+        if (queued > 0) {
+            set_last(true, false, 0, "queued", "");
+            ESP_LOGI(TAG, "enqueued %u events", (unsigned)queued);
+            remember_gps_if_ok(&snap);
+            if (s_drain_task) {
+                xTaskNotifyGive(s_drain_task);
+            }
+            return ESP_OK;
+        }
+        if (!enqueue_failed) {
             set_last(false, true, 0, "event build fail", "");
             return ESP_FAIL;
         }
-        err = store_sd_enqueue_line(event, (size_t)en);
-        if (err != ESP_OK) {
-            set_last(false, false, 0, "enqueue fail", esp_err_to_name(err));
-            ESP_LOGW(TAG, "enqueue fail: %s", esp_err_to_name(err));
-            return err;
-        }
-        set_last(true, false, 0, "queued", "");
-        ESP_LOGI(TAG, "enqueued %d bytes", en);
-        remember_gps_if_ok(&snap);
-        if (s_drain_task) {
-            xTaskNotifyGive(s_drain_task);
-        }
-        return ESP_OK;
+        /* Card failed this tick — fall through to live POST rather than lose
+         * the sample. store_sd unmounts itself after repeated write errors. */
+        ESP_LOGW(TAG, "SD enqueue failed — trying live POST");
     }
 
     /*
-     * No SD: live single POST to UPLINK_URL.
-     * Body is one object: {"schemaId":"1087","payload":{...}} (see uplink_payload_build).
+     * No usable SD: live POST to UPLINK_URL.
+     * Body is one envelope or a JSON array (see uplink_events_serialize_live).
      */
-    static char json[EVENT_BUF_LEN + 64];
-    int n = uplink_payload_build(&snap, s_schema_id, json, sizeof(json));
+    static char json[LIVE_BUF_LEN];
+    int n = uplink_events_serialize_live(events, event_count, json, sizeof(json));
     if (n < 0) {
         set_last(false, true, 0, "json build fail", "");
         return ESP_FAIL;
@@ -601,7 +644,7 @@ static esp_err_t produce_once_locked(void)
 
 /**
  * @brief Peek SD batch, POST array; ack bytes only on HTTP 2xx (400 keeps head).
- * @note Callers must hold s_io_mu.
+ * @note Callers must hold s_io_mu (see drain_once).
  */
 static esp_err_t drain_once_locked(void)
 {
@@ -635,12 +678,13 @@ static esp_err_t drain_once_locked(void)
     size_t use_lines = n_lines;
     size_t use_span = span;
     while (use_lines > 0) {
-        bn = uplink_payload_build_batch(peek, use_lines, s_schema_id, batch, sizeof(batch));
+        bn = uplink_payload_build_batch(peek, use_lines, batch, sizeof(batch));
         if (bn > 0 && (size_t)bn <= (size_t)CONFIG_STORE_SD_BATCH_MAX_BYTES) {
             break;
         }
         if (use_lines == 1) {
-            /* One record that can never be sent (corrupt or oversized). Drop it. */
+            /* One record that can never be sent (legacy format, corrupt, or
+             * oversized). Drop it so the queue always moves forward. */
             (void)store_sd_ack_bytes(use_span, 1);
             set_drain_err("dropped unusable record");
             ESP_LOGW(TAG, "dropped unusable queue record (%u bytes)", (unsigned)use_span);
@@ -660,7 +704,7 @@ static esp_err_t drain_once_locked(void)
 
     /*
      * Batch POST to the same UPLINK_URL as live path.
-     * Body is a JSON array: [{"schemaId":"1087","payload":{...}}, ...].
+     * Body is a JSON array of envelopes (schemaId per event).
      * On HTTP failure keep SD lines (ack only after success) so samples retry.
      */
     net_lte_http_result_t http;
@@ -680,7 +724,11 @@ static esp_err_t drain_once_locked(void)
     return err;
 }
 
-/* produce and drain share large static buffers and the modem. */
+/*
+ * produce and drain share large static buffers and the modem, and can be
+ * invoked from the tick task, the drain task, and `uplink now` at the same
+ * time. One gate keeps them strictly serialized.
+ */
 static esp_err_t produce_once(void)
 {
     if (s_io_mu == NULL) {
@@ -918,11 +966,16 @@ esp_err_t telemetry_uplink_queue_test_enqueue(void)
     if (telemetry_uplink_get_config(&cfg) != ESP_OK) {
         return ESP_FAIL;
     }
-    char line[192];
-    int n = snprintf(line, sizeof(line),
-                     "{\"payload\":{\"device_id\":\"%s\",\"node_id\":\"%s\","
-                     "\"schema_version\":1,\"source\":\"esp32_obd\"},\"queued_at_ms\":%llu}",
-                     cfg.device_id, cfg.node_id, (unsigned long long)now_ms());
+    char line[256];
+    uint64_t ts = event_ts_ms();
+    uplink_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    snprintf(ev.device_id, sizeof(ev.device_id), "%s", cfg.device_id);
+    snprintf(ev.node_id, sizeof(ev.node_id), "%s", cfg.node_id);
+    ev.schema_id = UPLINK_SCHEMA_OBD;
+    ev.ts_ms = ts;
+    snprintf(ev.payload_json, sizeof(ev.payload_json), "{\"source\":\"esp32_obd\"}");
+    int n = uplink_event_serialize_queued(&ev, ts, line, sizeof(line));
     if (n <= 0 || (size_t)n >= sizeof(line)) {
         return ESP_ERR_NO_MEM;
     }

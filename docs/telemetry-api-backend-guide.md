@@ -1,7 +1,7 @@
 # Fleet telemetry API — backend integration guide
 
 **Audience:** Backend / API developers consuming carrier uplink events  
-**Firmware source of truth:** `components/telemetry_uplink/uplink_payload.c`  
+**Firmware source of truth:** `components/telemetry_uplink/uplink_payload.c`, `uplink_schema.h`  
 **Last updated:** 2026-09-02
 
 ---
@@ -16,182 +16,98 @@
 | **Auth from device** | None today |
 | **Transport** | Quectel EC200U LTE modem (HTTPS via QHTTP AT) |
 
-The POST URL and schema id can be overridden per device in NVS (Carrier Console / serial). Factory defaults are defined in `components/telemetry_uplink/include/uplink_payload.h` (`UPLINK_URL`, `UPLINK_SCHEMA_ID`).
+The POST URL can be overridden per device in NVS (Carrier Console / serial). OBD `schemaId` defaults to `1087` and can also be overridden in NVS (`uplink schema`). Host and GPS schema IDs are defined in firmware (`uplink_schema.h`).
+
+---
+
+## Event envelope (all types)
+
+Each uplink item uses the same top-level envelope. Identity, schema, and time sit **outside** `payload`:
+
+```json
+{
+  "device_id": "carrier-042",
+  "node_id": "node-042",
+  "schemaId": "1087",
+  "ts_ms": 1710000001000,
+  "payload": { ... }
+}
+```
+
+### Mandatory envelope fields (every event)
+
+| Field | Required | Notes |
+|-------|----------|--------|
+| `device_id` | **Yes** | Non-empty string; carrier, virtual `gps-*`, or host id |
+| `node_id` | **Yes** | Non-empty string; paired with `device_id` |
+| `schemaId` | **Yes** | Non-empty; `1087` / `1088` / `1089` (see `uplink_schema_ids.h`) |
+| `ts_ms` | **Yes** | Always present; UTC epoch ms when LTE time synced, else uptime ms |
+| `payload` | **Yes** | Domain data only — identity/time are **not** duplicated inside |
+
+Firmware rejects building or serializing an event if any of `device_id`, `node_id`, or `schemaId` is missing/empty. Uplink is blocked until carrier `device_id` + `node_id` are provisioned (NVS).
+
+| Field | Description |
+|-------|-------------|
+| `device_id` | Event source identity (carrier, virtual GPS device, or sensor host) |
+| `node_id` | Secondary node identity for the same event source |
+| `schemaId` | Trafyn schema — determines `payload` shape |
+| `ts_ms` | Capture time — **UTC epoch ms** when LTE time is synced; otherwise device uptime ms |
+| `payload` | Domain-specific fields only |
+
+---
+
+## Schema IDs (firmware defaults)
+
+| schemaId | Type | `device_id` example |
+|----------|------|---------------------|
+| `1087` | OBD / vehicle telemetry | `carrier-042` (provisioned) |
+| `1088` | Host sensor reading (UL212, `host_type_id` 1) | `ul212-001` |
+| `1089` | GNSS position | `gps-042` (virtual, derived from carrier) |
+
+Schema map source: `components/telemetry_uplink/uplink_schema.c`. **Edit schema numbers in `components/telemetry_uplink/include/uplink_schema_ids.h` before build/OTA.**
 
 ---
 
 ## Request body shapes
 
-The device sends **one of two** JSON shapes to the same URL:
+### Live POST (no SD card)
 
-### Single event (live POST, no SD card)
+- **One event** → single JSON object (envelope above)
+- **Multiple events** from one tick → JSON array of envelopes
 
-```json
-{
-  "schemaId": "1087",
-  "payload": { ... }
-}
-```
+### Batch POST (SD queue drain)
 
-### Batch (SD queue drain)
+Always a JSON array of envelopes (one SD queue line per event):
 
 ```json
 [
-  { "schemaId": "1087", "payload": { ... } },
-  { "schemaId": "1087", "payload": { ... } }
+  { "device_id": "carrier-042", "node_id": "node-042", "schemaId": "1087", "ts_ms": ..., "payload": { ... } },
+  { "device_id": "gps-042", "node_id": "node-gps-042", "schemaId": "1089", "ts_ms": ..., "payload": { ... } },
+  { "device_id": "ul212-001", "node_id": "node-ul212-001", "schemaId": "1088", "ts_ms": ..., "payload": { ... } }
 ]
 ```
 
-**Parsing rule:** if the root JSON value is an array, treat each element as an event; otherwise treat the root object as a single event.
+**Parsing rule:**
 
 ```javascript
 const body = await request.json();
 const events = Array.isArray(body) ? body : [body];
 ```
 
-Return **HTTP 2xx** only on successful ingest. The device keeps queued events on SD until drain gets 2xx (non-2xx leaves the queue head in place).
+Return **HTTP 2xx** only on successful ingest. The device keeps queued SD lines until drain gets 2xx.
 
 ---
 
-## Identity (carrier vs hosts)
-
-| Field | Scope | Description |
-|-------|--------|-------------|
-| `payload.device_id` | **Carrier** | Unique telematics unit ID — provisioned once per device (NVS). Primary fleet key. |
-| `payload.node_id` | **Carrier** | Secondary node id — provisioned with `device_id`. |
-| `hosts[].device_id` | **Sensor host** | ID of an attached Zigbee sensor (e.g. `ul212-001`). **Not** the carrier id. |
-
-Fresh units ship **unprovisioned**; uplink is blocked until `device_id` + `node_id` are set via Carrier Console or serial `provision <device_id> <node_id>`.
-
----
-
-## Sample 1 — Full event (vehicle + GPS + OBD + two hosts)
-
-Primary integration fixture:
-
-```json
-{
-  "schemaId": "1087",
-  "payload": {
-    "device_id": "carrier-042",
-    "node_id": "node-042",
-    "schema_version": 1,
-    "ts_ms": 1710000000123,
-    "obd_profile": "fleet_basic",
-    "obd_protocol": "ISO15765-4 CAN11/500",
-    "uptime_seconds": 3600,
-    "poller_status": "on",
-    "cmds_ok": 1432,
-    "cmds_fail": 3,
-    "blocked_cmds": 0,
-    "telemetry_drops": 0,
-
-    "rpm": 780.5,
-    "rpm_raw_hex": "410C0C30",
-    "rpm_age_ms": 120,
-    "rpm_ok": true,
-
-    "speed_kmh": 42.0,
-    "speed_raw_hex": "410D2A",
-    "speed_age_ms": 120,
-    "speed_ok": true,
-
-    "coolant_c": 87.0,
-    "coolant_raw_hex": "41057F",
-    "coolant_age_ms": 120,
-    "coolant_ok": true,
-
-    "throttle_pct": 14.5,
-    "throttle_raw_hex": "411125",
-    "throttle_age_ms": 120,
-    "throttle_ok": true,
-
-    "voltage_v": 13.7,
-    "voltage_raw": "13.7V",
-    "voltage_age_ms": 120,
-    "voltage_ok": true,
-
-    "gps_ok": true,
-    "lat": 12.9715987,
-    "lng": 77.5945627,
-
-    "hosts": [
-      {
-        "device_id": "ul212-001",
-        "host_type": "ul212_ble_fetch",
-        "host_type_id": 1,
-        "readings": [
-          { "key": "height_mm", "value": 40.5, "unit": "mm", "valid": true },
-          { "key": "smooth_mm", "value": 40.2, "unit": "mm", "valid": true },
-          { "key": "signal", "value": 72, "unit": "", "valid": true }
-        ],
-        "ts_ms": 1710000000100
-      },
-      {
-        "device_id": "temp-host-002",
-        "host_type": "future_sensor",
-        "host_type_id": 2,
-        "readings": [
-          { "key": "temperature_c", "value": 28.3, "unit": "C", "valid": true }
-        ],
-        "ts_ms": 1710000000110
-      }
-    ],
-
-    "source": "esp32_obd"
-  }
-}
-```
-
----
-
-## Sample 2 — Bench / no vehicle (no OBD, no hosts)
-
-Typical indoors: no CAN ECU, no Zigbee hosts:
-
-```json
-{
-  "schemaId": "1087",
-  "payload": {
-    "device_id": "carrier-bench-01",
-    "node_id": "node-bench-01",
-    "schema_version": 1,
-    "ts_ms": 1710000005000,
-    "obd_profile": "fleet_basic",
-    "obd_protocol": "unknown",
-    "uptime_seconds": 120,
-    "poller_status": "paused",
-    "cmds_ok": 0,
-    "cmds_fail": 0,
-    "blocked_cmds": 0,
-    "telemetry_drops": 0,
-
-    "rpm_ok": false,
-    "speed_ok": false,
-    "coolant_ok": false,
-    "throttle_ok": false,
-    "voltage_ok": false,
-
-    "gps_ok": false,
-
-    "source": "esp32_obd"
-  }
-}
-```
-
----
-
-## Sample 3 — Batch POST (array of two events)
+## Sample — one uplink tick (OBD + GPS + host reading)
 
 ```json
 [
   {
+    "device_id": "carrier-042",
+    "node_id": "node-042",
     "schemaId": "1087",
+    "ts_ms": 1710000001000,
     "payload": {
-      "device_id": "carrier-042",
-      "node_id": "node-042",
-      "schema_version": 1,
-      "ts_ms": 1710000001000,
       "obd_profile": "fleet_basic",
       "obd_protocol": "ISO15765-4 CAN11/500",
       "uptime_seconds": 3605,
@@ -208,223 +124,165 @@ Typical indoors: no CAN ECU, no Zigbee hosts:
       "coolant_ok": false,
       "throttle_ok": false,
       "voltage_ok": false,
-      "gps_ok": true,
-      "lat": 12.9716000,
-      "lng": 77.5945600,
       "source": "esp32_obd"
     }
   },
   {
-    "schemaId": "1087",
+    "device_id": "gps-042",
+    "node_id": "node-gps-042",
+    "schemaId": "1089",
+    "ts_ms": 1710000001000,
     "payload": {
-      "device_id": "carrier-042",
-      "node_id": "node-042",
-      "schema_version": 1,
-      "ts_ms": 1710000006000,
-      "obd_profile": "fleet_basic",
-      "obd_protocol": "ISO15765-4 CAN11/500",
-      "uptime_seconds": 3610,
-      "poller_status": "on",
-      "cmds_ok": 1445,
-      "cmds_fail": 3,
-      "blocked_cmds": 0,
-      "telemetry_drops": 0,
-      "rpm_ok": false,
-      "speed_kmh": 0.0,
-      "speed_raw_hex": "410D00",
-      "speed_age_ms": 90,
-      "speed_ok": true,
-      "coolant_ok": false,
-      "throttle_ok": false,
-      "voltage_ok": false,
       "gps_ok": true,
-      "lat": 12.9716010,
-      "lng": 77.5945610,
-      "hosts": [
-        {
-          "device_id": "ul212-001",
-          "host_type": "ul212_ble_fetch",
-          "host_type_id": 1,
-          "readings": [
-            { "key": "height_mm", "value": 40.5, "unit": "mm", "valid": true }
-          ],
-          "ts_ms": 1710000005980
-        }
-      ],
-      "source": "esp32_obd"
+      "lat": 12.9716000,
+      "lng": 77.5945600
+    }
+  },
+  {
+    "device_id": "ul212-001",
+    "node_id": "node-ul212-001",
+    "schemaId": "1088",
+    "ts_ms": 1710000001000,
+    "payload": {
+      "key": "height_mm",
+      "value": 40.5,
+      "unit": "mm",
+      "valid": true
     }
   }
 ]
 ```
 
----
-
-## Payload field reference (carrier)
-
-### Always present
-
-| Field | Type | Notes |
-|-------|------|--------|
-| `device_id` | string | Carrier identity |
-| `node_id` | string | Carrier node identity |
-| `schema_version` | int | Currently `1` |
-| `ts_ms` | uint64 | Event capture time (ms, device monotonic clock) |
-| `obd_profile` | string | Active OBD poll profile name |
-| `obd_protocol` | string | e.g. `ISO15765-4 CAN11/500` or `unknown` |
-| `uptime_seconds` | uint32 | Device uptime |
-| `poller_status` | string | `"on"` or `"paused"` |
-| `cmds_ok` | uint64 | Runtime counter |
-| `cmds_fail` | uint64 | Runtime counter |
-| `blocked_cmds` | uint64 | Commands blocked by safety policy |
-| `telemetry_drops` | uint64 | Bus subscription drops |
-| `rpm_ok` … `voltage_ok` | bool | **Always sent** for all five PIDs |
-| `gps_ok` | bool | GNSS fix available |
-| `source` | string | Always `"esp32_obd"` |
-
-### OBD PID fields (conditional)
-
-Fresh window: **15 seconds** (`UPLINK_PID_FRESH_MS`).
-
-| When `*_ok` is `true` | Also present |
-|------------------------|--------------|
-| `rpm_ok` | `rpm`, `rpm_raw_hex`, `rpm_age_ms` |
-| `speed_ok` | `speed_kmh`, `speed_raw_hex`, `speed_age_ms` |
-| `coolant_ok` | `coolant_c`, `coolant_raw_hex`, `coolant_age_ms` |
-| `throttle_ok` | `throttle_pct`, `throttle_raw_hex`, `throttle_age_ms` |
-| `voltage_ok` | `voltage_v`, `voltage_raw`, `voltage_age_ms` |
-
-**Important:** When `*_ok` is `false`, the numeric/raw/age fields are **omitted** (not sent as `null`). Backend must not assume `0` for missing fields.
-
-A parked vehicle may legitimately send `speed_kmh: 0` with `speed_ok: true`.
-
-### GPS fields (conditional)
-
-| Field | When |
-|-------|------|
-| `lat`, `lng` | Only when `gps_ok == true` |
-
-The device may uplink GPS-only snapshots when CAN/OBD is unavailable.
-
-### `hosts` (optional)
-
-| Field | When |
-|-------|------|
-| `hosts` | Only when ≥1 Zigbee host has reported (max **4** hosts per event) |
-
-If no hosts are joined, the `hosts` key is **absent** (not an empty array).
+Each valid host reading emits its own `1088` event. A UL212 reporting six valid readings can produce six events in the same tick.
 
 ---
 
-## Handling `hosts[]` (dynamic sensor list)
+## Sample — bench / no vehicle (OBD event with no fresh PIDs)
 
-Each carrier event may include zero or more **attached sensor hosts** (Zigbee end devices). This is an **extensible** list — different host types expose different reading keys.
-
-### Host object shape
+When no CAN ECU is connected, the carrier may still emit an OBD-schema event with all `*_ok: false` and no numeric PID fields:
 
 ```json
 {
-  "device_id": "ul212-001",
-  "host_type": "ul212_ble_fetch",
-  "host_type_id": 1,
-  "readings": [
-    { "key": "height_mm", "value": 40.5, "unit": "mm", "valid": true }
-  ],
-  "ts_ms": 1710000000100
+  "device_id": "carrier-bench-01",
+  "node_id": "node-bench-01",
+  "schemaId": "1087",
+  "ts_ms": 1710000005000,
+  "payload": {
+    "obd_profile": "fleet_basic",
+    "obd_protocol": "unknown",
+    "uptime_seconds": 120,
+    "poller_status": "paused",
+    "cmds_ok": 0,
+    "cmds_fail": 0,
+    "blocked_cmds": 0,
+    "telemetry_drops": 0,
+    "rpm_ok": false,
+    "speed_ok": false,
+    "coolant_ok": false,
+    "throttle_ok": false,
+    "voltage_ok": false,
+    "source": "esp32_obd"
+  }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `device_id` | Host sensor id (separate namespace from carrier `payload.device_id`) |
-| `host_type` | String label from host manifest (e.g. `ul212_ble_fetch`) |
-| `host_type_id` | Numeric type — **use for server-side schema lookup** |
-| `readings` | 0–8 items; keys/units vary by host type |
-| `readings[].key` | Metric name (manifest-defined) |
-| `readings[].value` | Numeric value |
-| `readings[].unit` | Unit string (may be empty) |
-| `readings[].valid` | If `false`, skip this reading |
-| `ts_ms` | Host report timestamp (ms) |
-
-### Reference: UL212 host (`host_type_id: 1`)
-
-From `hardware/fleet_telematics_carrier/host/ul212-ble-fetch/host.manifest.json`:
-
-| key | unit | Description |
-|-----|------|-------------|
-| `height_mm` | mm | Liquid height (primary) |
-| `smooth_mm` | mm | Smoothed height |
-| `temperature_c` | C | Temperature |
-| `signal` | (none) | BLE signal strength |
-| `valid_echo` | (none) | Echo validity flag |
-| `tilt_deg` | (none) | Tilt |
-
-Future host types will add new `host_type_id` values and new `readings[].key` sets.
-
-### Backend implementation checklist
-
-1. **Accept variable `hosts` length** — 0 to 4; do not require the field.
-2. **Route by `schemaId`** (`"1087"`) then parse `payload`.
-3. **Index carrier events** by `payload.device_id` + `payload.ts_ms`.
-4. **Index host metrics** by `(carrier device_id, hosts[].device_id, hosts[].ts_ms, readings[].key)`.
-5. **Maintain a host type catalog** keyed by `host_type_id` (mirror device manifests under `hardware/fleet_telematics_carrier/host/`).
-6. **Parse readings generically** — loop keys; do not hard-code only UL212 fields on the carrier schema.
-7. **Skip invalid readings** — ignore entries where `valid == false`.
-8. **Tolerate unknown keys** — store raw JSON or drop unknown keys; do not fail the whole request when a new host type appears before the catalog is updated.
-9. **Do not conflate ids** — `payload.device_id` is the truck box; `hosts[].device_id` is the sensor.
-
-### Pseudocode
-
-```python
-def ingest_event(event: dict) -> None:
-    if event.get("schemaId") != "1087":
-        raise BadRequest("unsupported schemaId")
-
-    p = event["payload"]
-    if not p.get("device_id") or not p.get("node_id"):
-        raise BadRequest("device_id and node_id required")
-
-    store_carrier_snapshot(p)
-
-    for host in p.get("hosts") or []:
-        host_id = host["device_id"]
-        type_id = host["host_type_id"]
-        for r in host.get("readings") or []:
-            if not r.get("valid", True):
-                continue
-            store_host_reading(
-                carrier_id=p["device_id"],
-                host_id=host_id,
-                host_type_id=type_id,
-                key=r["key"],
-                value=r["value"],
-                unit=r.get("unit", ""),
-                ts_ms=host["ts_ms"],
-            )
-```
+Note: OBD events are only emitted when at least one PID is fresh (≤15 s). Bench units with no CAN may emit GPS or host events only.
 
 ---
 
-## Validation & error responses
+## Payload field reference
 
-Suggested **400 Bad Request** when:
+### Schema 1087 — OBD (`payload`)
 
-- Body is not valid JSON
-- Root is neither object nor array of objects
-- `schemaId` missing or not registered
-- `payload.device_id` or `payload.node_id` missing or empty
+| Field | Type | Notes |
+|-------|------|--------|
+| `obd_profile` | string | Active poll profile |
+| `obd_protocol` | string | e.g. `ISO15765-4 CAN11/500` or `unknown` |
+| `uptime_seconds` | uint32 | Device uptime |
+| `poller_status` | string | `"on"` or `"paused"` |
+| `cmds_ok`, `cmds_fail`, `blocked_cmds`, `telemetry_drops` | uint64 | Runtime counters |
+| `rpm_ok` … `voltage_ok` | bool | **Always sent** for all five PIDs |
+| `rpm`, `speed_kmh`, etc. | varies | Only when corresponding `*_ok` is `true` (fresh ≤15 s) |
+| `source` | string | Always `"esp32_obd"` |
 
-Suggested **2xx** when the event(s) are accepted (even if some optional fields are unknown — prefer ingest + quarantine over hard reject).
+GPS and host data are **not** in schema 1087 — they are separate events.
+
+### Schema 1089 — GPS (`payload`)
+
+| Field | When |
+|-------|------|
+| `gps_ok` | Always |
+| `lat`, `lng` | Only when `gps_ok == true` |
+
+Virtual identity: `device_id` = `gps-{suffix}`, `node_id` = `node-gps-{suffix}` where suffix is the part after the last `-` in the carrier `device_id` (e.g. `carrier-042` → `gps-042`).
+
+### Schema 1088 — Host reading (`payload`)
+
+One reading per event:
+
+| Field | Type | Notes |
+|-------|------|--------|
+| `key` | string | e.g. `height_mm`, `signal` |
+| `value` | number | Reading value |
+| `unit` | string | May be empty |
+| `valid` | bool | Only `valid: true` readings are uplinked |
+
+Host `device_id` is the sensor's provisioned id (e.g. `ul212-001`). Host `node_id` is derived as `node-{host_device_id}`. `ts_ms` is the carrier's tick time (not the host's own clock), so every event in a batch shares one time base.
+
+A host that stops reporting for more than 2 minutes drops out of the uplink entirely, so stale readings are never re-sent as if fresh.
+
+### UL212 reading keys (`host_type_id: 1`)
+
+| key | unit |
+|-----|------|
+| `height_mm` | mm |
+| `smooth_mm` | mm |
+| `temperature_c` | C |
+| `signal` | (none) |
+| `valid_echo` | (none) |
+| `tilt_deg` | (none) |
 
 ---
 
-## Differences from older documentation
+## Wall-clock time (`ts_ms`)
 
-| Old (BLE / SoftAP era) | Current (MCP2515 carrier) |
-|------------------------|---------------------------|
-| `ble_connected`, `elm_ready`, `ble_peer_address` | **Removed** — CAN path only |
-| Stale PIDs as JSON `null` | Stale PIDs **omitted**; `*_ok: false` always present |
-| Fixed payload only | Optional **`hosts[]`** array for Zigbee sensors |
-| Shared demo `device_id` | **Per-device provisioned** ids (no factory default) |
+When the EC200U LTE modem is up, firmware syncs **UTC epoch milliseconds**:
+
+| Priority | Source | When | Extra AT load |
+|----------|--------|------|----------------|
+| 1 | `+QGPSLOC` UTC+date | GNSS fix — piggybacks the existing GPS poll | None |
+| 2 | `AT+CCLK?` network time | Works indoors; every 60 s until synced, then every 30 min | 1 AT command |
+| 3 | `esp_timer` uptime | Before the first sync | None |
+
+GPS is unambiguous UTC, so once GPS has set the clock, CCLK will not move it.
+
+India (IST): `+CCLK` reports timezone `+22` (UTC+5:30). If an operator omits the timezone field, firmware assumes IST rather than storing local time as UTC. Values outside 2025–2100 are rejected, so an unregistered modem's 1980 default is ignored.
+
+Between syncs the clock is extrapolated from the ESP32 monotonic timer, so there is no per-tick AT traffic.
+
+**Backend note:** `ts_ms` is UTC epoch ms only after sync. Until then it is a small uptime value (e.g. `3605000`). Treat any `ts_ms` below `1735689600000` (2025-01-01) as "device clock not yet synced" and fall back to your own receive time.
+
+---
+
+1. **Parse envelope** — `device_id`, `node_id`, `schemaId`, `ts_ms`, `payload` at top level.
+2. **Route by `schemaId`** — `1087` OBD, `1088` host reading, `1089` GPS.
+3. **Handle single object or array** on live POST.
+4. **Index OBD** by `(device_id, ts_ms)`.
+5. **Index GPS** by virtual `device_id` or correlate to carrier via suffix.
+6. **Index host readings** by `(host device_id, ts_ms, payload.key)`.
+7. **Do not conflate ids** — carrier `device_id`, virtual `gps-*`, and host `ul212-*` are separate namespaces.
+
+---
+
+## Differences from previous format (pre-2026-09)
+
+| Old | New |
+|-----|-----|
+| One fat `1087` event with GPS + `hosts[]` nested in `payload` | Multiple typed events per tick |
+| `device_id` / `node_id` inside `payload` | Identity at envelope level |
+| `schemaId` only at HTTP wrapper | `schemaId` on every event |
+| `schema_version` in payload | Removed — use per-event `schemaId` |
+| `hosts[]` array | One `1088` event per valid reading |
 
 ---
 
@@ -432,29 +290,27 @@ Suggested **2xx** when the event(s) are accepted (even if some optional fields a
 
 | Path | Purpose |
 |------|---------|
-| `components/telemetry_uplink/uplink_payload.c` | JSON builder (authoritative field list) |
-| `components/telemetry_uplink/include/uplink_payload.h` | URL, schema id, struct limits |
-| `hardware/fleet_telematics_carrier/host/*/host.manifest.json` | Host reading key catalog |
+| `components/telemetry_uplink/uplink_payload.c` | JSON builders |
+| `components/telemetry_uplink/include/uplink_schema_ids.h` | **Schema ID numbers (edit before build)** |
+| `components/telemetry_uplink/uplink_schema.c` | Host type → schema lookup table |
+| `hardware/fleet_telematics_carrier/host/*/host.manifest.json` | Host reading catalog |
 | `docs/fleet-zigbee-host-guide.md` | Zigbee host onboarding |
 | `tools/carrier_console/` | PC provisioning UI |
 
 ---
 
-## Quick curl test (backend local)
-
-Replace URL and body as needed:
+## Quick curl test
 
 ```bash
 curl -sS -X POST 'https://api.trafyn.info/nc-events-api/v2/messages' \
   -H 'Content-Type: application/json' \
   -d @- <<'EOF'
 {
+  "device_id": "carrier-test-001",
+  "node_id": "node-test-001",
   "schemaId": "1087",
+  "ts_ms": 1710000000123,
   "payload": {
-    "device_id": "carrier-test-001",
-    "node_id": "node-test-001",
-    "schema_version": 1,
-    "ts_ms": 1710000000123,
     "obd_profile": "fleet_basic",
     "obd_protocol": "unknown",
     "uptime_seconds": 60,
@@ -468,7 +324,6 @@ curl -sS -X POST 'https://api.trafyn.info/nc-events-api/v2/messages' \
     "coolant_ok": false,
     "throttle_ok": false,
     "voltage_ok": false,
-    "gps_ok": false,
     "source": "esp32_obd"
   }
 }
