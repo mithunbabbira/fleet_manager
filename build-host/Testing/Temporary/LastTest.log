@@ -1,0 +1,131 @@
+Start testing: Sep 02 22:05 IST
+----------------------------------------------------------
+1/8 Testing: test_cmd_policy
+1/8 Test: test_cmd_policy
+Command: "/tmp/fleet-review-uplink/build-host/test_cmd_policy"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_cmd_policy" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_cmd_policy: PASS
+<end of output>
+Test time =   0.62 sec
+----------------------------------------------------------
+Test Passed.
+"test_cmd_policy" end time: Sep 02 22:05 IST
+"test_cmd_policy" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/8 Testing: test_obd_codec
+2/8 Test: test_obd_codec
+Command: "/tmp/fleet-review-uplink/build-host/test_obd_codec"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_obd_codec" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_obd_codec: PASS
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"test_obd_codec" end time: Sep 02 22:05 IST
+"test_obd_codec" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/8 Testing: test_uplink_payload
+3/8 Test: test_uplink_payload
+Command: "/tmp/fleet-review-uplink/build-host/test_uplink_payload"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_uplink_payload" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_uplink_payload: PASS
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"test_uplink_payload" end time: Sep 02 22:05 IST
+"test_uplink_payload" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/8 Testing: test_obd_isotp
+4/8 Test: test_obd_isotp
+Command: "/tmp/fleet-review-uplink/build-host/test_obd_isotp"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_obd_isotp" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_obd_isotp: all tests passed
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"test_obd_isotp" end time: Sep 02 22:05 IST
+"test_obd_isotp" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/8 Testing: test_fw_ota_lte_parse
+5/8 Test: test_fw_ota_lte_parse
+Command: "/tmp/fleet-review-uplink/build-host/test_fw_ota_lte_parse"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_fw_ota_lte_parse" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_fw_ota_lte_parse: ok
+<end of output>
+Test time =   0.47 sec
+----------------------------------------------------------
+Test Passed.
+"test_fw_ota_lte_parse" end time: Sep 02 22:05 IST
+"test_fw_ota_lte_parse" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/8 Testing: test_fleet_tlv
+6/8 Test: test_fleet_tlv
+Command: "/tmp/fleet-review-uplink/build-host/test_fleet_tlv"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_fleet_tlv" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_fleet_tlv: OK
+<end of output>
+Test time =   0.47 sec
+----------------------------------------------------------
+Test Passed.
+"test_fleet_tlv" end time: Sep 02 22:05 IST
+"test_fleet_tlv" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/8 Testing: test_host_registry
+7/8 Test: test_host_registry
+Command: "/tmp/fleet-review-uplink/build-host/test_host_registry"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_host_registry" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_host_registry: OK
+<end of output>
+Test time =   0.45 sec
+----------------------------------------------------------
+Test Passed.
+"test_host_registry" end time: Sep 02 22:05 IST
+"test_host_registry" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/8 Testing: test_fleet_uplink_path
+8/8 Test: test_fleet_uplink_path
+Command: "/tmp/fleet-review-uplink/build-host/test_fleet_uplink_path"
+Directory: /tmp/fleet-review-uplink/build-host
+"test_fleet_uplink_path" start time: Sep 02 22:05 IST
+Output:
+----------------------------------------------------------
+test_fleet_uplink_path: PASS
+<end of output>
+Test time =   0.46 sec
+----------------------------------------------------------
+Test Passed.
+"test_fleet_uplink_path" end time: Sep 02 22:05 IST
+"test_fleet_uplink_path" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 02 22:05 IST

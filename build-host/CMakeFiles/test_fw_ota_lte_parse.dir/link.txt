@@ -1,0 +1,1 @@
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_fw_ota_lte_parse.dir/test_fw_ota_lte_parse.c.o "CMakeFiles/test_fw_ota_lte_parse.dir/tmp/fleet-review-uplink/components/fw_ota_lte/fw_ota_lte_parse.c.o" "CMakeFiles/test_fw_ota_lte_parse.dir/Users/nc23896-mithun/esp/esp-idf/components/json/cJSON/cJSON.c.o" -o test_fw_ota_lte_parse

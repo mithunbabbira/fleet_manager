@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/tmp/fleet-review-uplink/build-host/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

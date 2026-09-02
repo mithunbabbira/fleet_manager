@@ -7,7 +7,7 @@
  *   1) Produce task samples OBD + GNSS on an interval (NVS uplink_iv).
  *   2) Prefer enqueue to microSD (durable queue).
  *   3) Drain task batch-POSTs queued events to UPLINK_URL (see uplink_payload.h).
- *   4) If SD is missing, produce does a live POST (single envelope or array).
+ *   4) If SD is missing, produce does a live single POST to the same URL.
  *
  * device_id / node_id / enable / interval / POST URL / schema live in NVS.
  * Factory defaults for URL/schema are in uplink_payload.h when NVS is empty.

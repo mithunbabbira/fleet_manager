@@ -1,0 +1,9 @@
+test_cmd_policy 1 0.622591
+test_obd_codec 1 0.452775
+test_uplink_payload 1 0.448002
+test_obd_isotp 1 0.447387
+test_fw_ota_lte_parse 1 0.472092
+test_fleet_tlv 1 0.465794
+test_host_registry 1 0.449747
+test_fleet_uplink_path 1 0.457882
+---

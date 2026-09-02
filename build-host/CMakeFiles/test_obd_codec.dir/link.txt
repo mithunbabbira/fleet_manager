@@ -1,0 +1,1 @@
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_obd_codec.dir/test_obd_codec.c.o "CMakeFiles/test_obd_codec.dir/tmp/fleet-review-uplink/components/obd_codec/obd_codec.c.o" -o test_obd_codec  -lm

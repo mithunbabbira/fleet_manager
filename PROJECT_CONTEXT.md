@@ -24,7 +24,7 @@ ESP-IDF firmware (CMake project name `elm327_esp32c6`) for an ESP32-C6 Super Min
 - enforces `cmd_policy` before sending vehicle commands;
 - exposes status, control, and telemetry through USB serial and the PC Carrier Console;
 - posts telemetry through an EC200U using Quectel QHTTP AT commands (HTTPS);
-- optionally ingests Zigbee host TLV reports as separate schema-1088 uplink events;
+- optionally ingests Zigbee host TLV reports into the uplink `hosts[]` array.
 
 The default profile is `fleet_basic`. The CAN path was validated in-car on
 2026-07-29 (CAN11/500, live RPM/speed/coolant/throttle). The printed carrier
@@ -140,30 +140,30 @@ status, profile, telemetry, LTE, uplink, VIN, DTC, and OBD APIs — see
 
 ## LTE uplink
 
-`telemetry_uplink` emits **multiple typed events** per tick (OBD `1087`, GPS `1089`,
-host reading `1088`) with envelope `{device_id, node_id, schemaId, ts_ms, payload}`.
-`ts_ms` uses modem wall-clock when available (`AT+CCLK?` network time, else GPS UTC
-from the existing `QGPSLOC` poll); falls back to uptime ms until first sync.
-Events queue one-per-line on microSD and batch-POST as a JSON array. See
-`docs/telemetry-api-backend-guide.md`.
+`telemetry_uplink` builds OBD snapshots (including optional `lat`/`lng`/`gps_ok`
+from the EC200U GNSS cache when fixed) and enqueues them on microSD
+(`/sdcard/uplinkq.dat`). A drain task batch-POSTs events to the fleet
+endpoint through the EC200U and removes records only after HTTP 2xx. If the SD
+card is missing, it falls back to live single-event POST. Serial/Carrier Console
+exposes queue depth, SD mount state, and GNSS fix (`uplink` command). See
+`docs/superpowers/specs/2026-08-06-sd-uplink-queue-design.md`.
 
 Bench 2026-08-18: modem registered on Airtel (`csq=18`); HTTP left the module
-(server 400 is an API/payload issue, not a UART failure). Backend must register
-schemas `1088` and `1089` for host and GPS events.
+(server 400 is an API/payload issue, not a UART failure). Batch drain with
+`hosts[]` may still return HTTP 400 until the cloud schema is updated.
 
 ## Fleet Zigbee
 
 Optional second ESP32-C6 hosts join an **open** Zigbee network on channel 15 and
 send `fleet_tlv` frames on custom cluster `0xFC00`. Coordinator ingest updates
-`host_registry`; each valid host reading becomes a separate schema-`1088` uplink
-event (not a nested `hosts[]` array).
+`host_registry`; uplink JSON includes a `hosts[]` array.
 
 Docs: `docs/fleet-zigbee-host-guide.md`, `docs/fleet-zigbee-coexistence.md`.
 
 ## Known follow-up work
 
 - Confirm OBD ECU replies on a live vehicle CAN bus with this PCB.
-- Cloud: register and ingest schemas `1088` (host readings) and `1089` (GPS).
+- Cloud batch endpoint: accept `hosts[]` in drain POST (currently HTTP 400 in lab).
 - Zigbee rejoin after power-cycle and multi-host soak tests.
 - Keep legacy NVS namespace/key names only where changing them would require an
   explicit migration.

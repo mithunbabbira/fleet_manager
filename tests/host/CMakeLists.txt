@@ -22,7 +22,6 @@ target_link_libraries(test_obd_codec m)
 add_executable(test_uplink_payload
     test_uplink_payload.c
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
-    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_schema.c
 )
 target_include_directories(test_uplink_payload PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
@@ -94,7 +93,6 @@ add_executable(test_fleet_uplink_path
     ${CMAKE_SOURCE_DIR}/../../components/host_registry/host_registry.c
     ${CMAKE_SOURCE_DIR}/../../components/host_registry/fleet_manifest_catalog.c
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
-    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_schema.c
 )
 target_include_directories(test_fleet_uplink_path PRIVATE
     ${CMAKE_SOURCE_DIR}/shims
