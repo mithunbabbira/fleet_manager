@@ -49,7 +49,7 @@ static const char *TAG = "uplink";
 #define UPLINK_DRAIN_STACK 8192
 #define UPLINK_TASK_PRIO 4
 #define UPLINK_CACHE_TASK_STACK 3072
-#define EVENT_BUF_LEN 1024
+#define EVENT_BUF_LEN 1536
 #define LIVE_BUF_LEN 8192
 #define BATCH_BUF_LEN 13000
 #define PEEK_BUF_LEN 12000
@@ -123,7 +123,7 @@ static void remember_gps_if_ok(const uplink_snapshot_t *snap)
     s_have_gps_last = true;
     s_last_gps_lat = snap->lat;
     s_last_gps_lng = snap->lng;
-    s_last_gps_ms = snap->ts_ms;
+    s_last_gps_ms = now_ms(); /* monotonic — paired with gps_only_worth_sending */
 }
 
 /** @brief Record last produce/drain diagnostic (SoftAP/serial). */
@@ -554,10 +554,12 @@ static esp_err_t produce_once_locked(void)
 
     snap.ts_ms = event_ts_ms();
 
+    /* GPS move/heartbeat math must stay on the monotonic clock — wall clock
+     * jumps when CCLK/GPS syncs and would falsely trip the 5‑minute heartbeat. */
     bool gps_worth = true;
     if (!have_fresh && snap.gps_ok) {
         gps_worth = uplink_gps_only_worth_sending(s_have_gps_last, s_last_gps_lat, s_last_gps_lng,
-                                                  s_last_gps_ms, snap.lat, snap.lng, snap.ts_ms);
+                                                  s_last_gps_ms, snap.lat, snap.lng, now_ms());
     }
     if (!uplink_tick_worth_producing(have_fresh, snap.gps_ok, gps_worth, &snap)) {
         set_last(false, true, 0, "no events", "");

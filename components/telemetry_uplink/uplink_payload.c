@@ -308,7 +308,7 @@ int uplink_payload_build_host_reading_payload(const uplink_host_reading_t *readi
         append_json_str(out, out_len, &off, reading->key) != 0) {
         return -1;
     }
-    if (appendf(out, out_len, &off, ",\"value\":%.4g,\"unit\":") != 0) {
+    if (appendf(out, out_len, &off, ",\"value\":%.4g,\"unit\":", reading->value) != 0) {
         return -1;
     }
     if (append_json_str(out, out_len, &off, reading->unit) != 0) {

@@ -168,6 +168,7 @@ int main(void)
     assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
     assert(strstr(buf, "\"node_id\":\"node-ul212-001\"") != NULL);
     assert(strstr(buf, "\"height_mm\"") != NULL);
+    assert(strstr(buf, "\"value\":40.9") != NULL);
     assert(strstr(buf, "\"hosts\":[") == NULL);
 
     assert(uplink_should_enqueue(true, false) == true);
