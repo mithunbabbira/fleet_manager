@@ -3,7 +3,7 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_private/uart_share_hw_ctrl.h"
+#include "esp_private/uart_private.h"
 #include "hal/uart_ll.h"
 #include "soc/soc_caps.h"
 #include "freertos/FreeRTOS.h"
