@@ -23,7 +23,12 @@ static const char *TAG = "store_sd";
 #define QUEUE_PATH  MOUNT_POINT "/uplinkq.dat" /* 8.3 — FatFS LFN may be off */
 #define META_PATH   MOUNT_POINT "/uplinkq.met"
 #define TMP_PATH    MOUNT_POINT "/uplinkq.tmp"
+#define BAK_PATH    MOUNT_POINT "/uplinkq.bak"
 #define COMPACT_HEAD_BYTES (256u * 1024u)
+
+/* Card pulled or dying: after this many write failures stop claiming "mounted"
+ * so the uplink falls back to live POST instead of silently dropping data. */
+#define STORE_SD_MAX_IO_FAILS 3
 
 static SemaphoreHandle_t s_spi_mu;
 static SemaphoreHandle_t s_q_mu;
@@ -31,6 +36,7 @@ static sdmmc_card_t *s_card;
 static bool s_mounted;
 static uint64_t s_head;
 static uint32_t s_count;
+static uint8_t s_io_fails;
 static char s_last_err[80];
 
 /** @brief Copy last-error string into s_last_err. */
@@ -242,12 +248,43 @@ static esp_err_t compact_unlocked(void)
     }
     fclose(in);
     fclose(out);
-    unlink(QUEUE_PATH);
-    if (rename(TMP_PATH, QUEUE_PATH) != 0) {
+    /* Keep the original until the replacement is in place — a failed rename
+     * must not leave the queue with no file at all. */
+    unlink(BAK_PATH);
+    if (rename(QUEUE_PATH, BAK_PATH) != 0) {
+        unlink(TMP_PATH);
         return ESP_FAIL;
     }
+    if (rename(TMP_PATH, QUEUE_PATH) != 0) {
+        rename(BAK_PATH, QUEUE_PATH);
+        unlink(TMP_PATH);
+        return ESP_FAIL;
+    }
+    unlink(BAK_PATH);
     s_head = 0;
     return meta_save_unlocked();
+}
+
+/** @brief Count newline-terminated lines from @p offset to EOF. */
+static uint32_t count_lines_from_unlocked(uint64_t offset)
+{
+    FILE *f = fopen(QUEUE_PATH, "r");
+    if (!f) {
+        return 0;
+    }
+    if (fseek(f, (long)offset, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    uint32_t lines = 0;
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '\n') {
+            lines++;
+        }
+    }
+    fclose(f);
+    return lines;
 }
 
 #if CONFIG_STORE_SD_ENABLE
@@ -344,7 +381,8 @@ esp_err_t store_sd_init(void)
         return ESP_ERR_TIMEOUT;
     }
     meta_load_unlocked();
-    /* Sanity: if file shorter than head, reset. */
+    /* Reconcile meta against the real file: a lost or stale .met must not
+     * strand queued records or point past EOF. */
     uint64_t sz = file_size_unlocked(QUEUE_PATH);
     if (s_head > sz) {
         ESP_LOGW(TAG, "meta head past EOF — resetting queue");
@@ -352,9 +390,18 @@ esp_err_t store_sd_init(void)
         s_count = 0;
         unlink(QUEUE_PATH);
         meta_save_unlocked();
+    } else if (sz > s_head && s_count == 0) {
+        s_count = count_lines_from_unlocked(s_head);
+        ESP_LOGW(TAG, "meta count lost — recovered %u queued records", (unsigned)s_count);
+        meta_save_unlocked();
+    } else if (sz == s_head && s_count != 0) {
+        ESP_LOGW(TAG, "meta count %u with empty queue — clearing", (unsigned)s_count);
+        s_count = 0;
+        meta_save_unlocked();
     }
     store_sd_spi_unlock();
 
+    s_io_fails = 0;
     s_mounted = true;
     set_err("");
     ESP_LOGI(TAG, "mounted depth=%u head=%llu", (unsigned)s_count,
@@ -470,12 +517,26 @@ esp_err_t store_sd_enqueue_line(const char *line, size_t line_len)
     if (s_head >= COMPACT_HEAD_BYTES) {
         compact_unlocked();
     }
+
+    if (err == ESP_OK) {
+        s_io_fails = 0;
+    } else if (s_io_fails < STORE_SD_MAX_IO_FAILS) {
+        s_io_fails++;
+    }
 #else
     err = ESP_ERR_NOT_SUPPORTED;
 #endif
 
     store_sd_spi_unlock();
     xSemaphoreGive(s_q_mu);
+
+    if (s_io_fails >= STORE_SD_MAX_IO_FAILS && s_mounted) {
+        /* Card removed or failing — drop to unmounted so callers use live POST. */
+        s_mounted = false;
+        set_err("sd write failures — marked unmounted");
+        ESP_LOGE(TAG, "SD unusable after %u write failures; falling back to live POST",
+                 (unsigned)s_io_fails);
+    }
     return err;
 }
 
@@ -581,6 +642,18 @@ esp_err_t store_sd_ack_bytes(size_t byte_span, size_t lines)
         return ESP_ERR_TIMEOUT;
     }
 
+    /* Never let head run past EOF: that state reports depth>0 while peek
+     * returns nothing, which would stall the drain forever. */
+    uint64_t sz = file_size_unlocked(QUEUE_PATH);
+    if (s_head + (uint64_t)byte_span >= sz) {
+        s_head = 0;
+        s_count = 0;
+        unlink(QUEUE_PATH);
+        esp_err_t derr = meta_save_unlocked();
+        store_sd_spi_unlock();
+        xSemaphoreGive(s_q_mu);
+        return derr;
+    }
     s_head += byte_span;
     if (s_count >= lines) {
         s_count -= (uint32_t)lines;

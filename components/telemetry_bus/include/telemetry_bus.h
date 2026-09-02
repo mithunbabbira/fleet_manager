@@ -75,8 +75,10 @@ typedef struct {
     uint64_t ts_ms;
 } telemetry_error_msg_t;
 
+/* Sized to the manifest limits (FLEET_MANIFEST_KEY_MAX / _TYPE_NAME_MAX) so a
+ * long reading key can never be silently truncated on its way to the cloud. */
 typedef struct {
-    char key[20];
+    char key[24];
     double value;
     char unit[8];
     bool valid;
@@ -84,7 +86,7 @@ typedef struct {
 
 typedef struct {
     char device_id[32];
-    char host_type[24];
+    char host_type[32];
     uint16_t host_type_id;
     uint8_t reading_count;
     telemetry_host_reading_t readings[FLEET_MAX_READINGS_PER_REPORT];

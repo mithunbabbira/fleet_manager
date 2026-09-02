@@ -1,57 +1,75 @@
 #include "uplink_payload.h"
+#include "uplink_schema.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
+static void fill_base_snapshot(uplink_snapshot_t *snap)
+{
+    memset(snap, 0, sizeof(*snap));
+    snprintf(snap->device_id, sizeof(snap->device_id), "%s", "carrier-042");
+    snprintf(snap->node_id, sizeof(snap->node_id), "%s", "node-042");
+    snprintf(snap->obd_profile, sizeof(snap->obd_profile), "%s", "fleet_basic");
+    snprintf(snap->obd_protocol, sizeof(snap->obd_protocol), "%s", "ISO15765-4 CAN11/500");
+    snap->uptime_seconds = 3605;
+    snap->poller_status = "on";
+    snap->cmds_ok = 1440;
+    snap->ts_ms = 1710000001000ULL;
+
+    snap->rpm.valid = true;
+    snap->rpm.ok = true;
+    snap->rpm.value = 790.0;
+    snap->rpm.age_ms = 80;
+    snprintf(snap->rpm.raw, sizeof(snap->rpm.raw), "%s", "410C0C31");
+}
+
 int main(void)
 {
     uplink_snapshot_t snap;
-    memset(&snap, 0, sizeof(snap));
-    snprintf(snap.device_id, sizeof(snap.device_id), "%s", "fleet-demo-001");
-    snprintf(snap.node_id, sizeof(snap.node_id), "%s", "esp32c6-01");
-    snprintf(snap.obd_profile, sizeof(snap.obd_profile), "%s", "can_11_500");
-    snprintf(snap.obd_protocol, sizeof(snap.obd_protocol), "%s", "unknown");
-    snap.uptime_seconds = 29;
-    snap.poller_status = "on";
-    snap.cmds_ok = 143;
-    snap.ts_ms = 1710000000123ULL;
+    fill_base_snapshot(&snap);
 
-    /* Missing speed: keys omitted (schema rejects null) + speed_ok false. */
+  /* Missing speed: keys omitted + speed_ok false in OBD payload. */
     snap.speed.valid = false;
 
-    snap.rpm.valid = true;
-    snap.rpm.ok = true;
-    snap.rpm.value = 779.5;
-    snap.rpm.age_ms = 120;
-    snprintf(snap.rpm.raw, sizeof(snap.rpm.raw), "%s", "410C0C2E");
+    uplink_emit_ctx_t emit = {
+        .include_obd = true,
+        .include_gps = false,
+        .obd_schema_id = NULL,
+    };
+    uplink_event_t events[UPLINK_MAX_EVENTS_PER_TICK];
+    uint8_t count = 0;
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    assert(count == 1);
 
     char buf[2048];
-    int n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    int n = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(n > 0);
+    assert(buf[0] == '{');
+    assert(strstr(buf, "\"device_id\":\"carrier-042\"") != NULL);
+    assert(strstr(buf, "\"node_id\":\"node-042\"") != NULL);
     assert(strstr(buf, "\"schemaId\":\"1087\"") != NULL);
-    assert(strstr(buf, "null") == NULL);            /* schema forbids null */
-    assert(strstr(buf, "\"speed_kmh\"") == NULL);   /* omitted entirely */
-    assert(strstr(buf, "\"speed_raw_hex\"") == NULL);
-    assert(strstr(buf, "\"speed_age_ms\"") == NULL);
+    assert(strstr(buf, "\"ts_ms\":1710000001000") != NULL);
+    assert(strstr(buf, "\"payload\":{") != NULL);
+    /* Mandatory envelope: never inside payload only */
+    assert(strstr(buf, "\"schema_version\"") == NULL);
+    assert(strstr(buf, "null") == NULL);
+    assert(strstr(buf, "\"speed_kmh\"") == NULL);
     assert(strstr(buf, "\"speed_ok\":false") != NULL);
-    assert(strstr(buf, "\"rpm\":779.5") != NULL);
+    assert(strstr(buf, "\"rpm\":790") != NULL);
     assert(strstr(buf, "\"rpm_ok\":true") != NULL);
-    assert(strstr(buf, "\"ts_ms\":1710000000123") != NULL);
-    assert(strstr(buf, "255") == NULL);
-    assert(strstr(buf, "ble_peer_address") == NULL);
-    assert(strstr(buf, "adapter_name") == NULL);
-    assert(strstr(buf, "ble_connected") == NULL);
-    assert(strstr(buf, "elm_ready") == NULL);
-    assert(strstr(buf, "ble_reconnects") == NULL);
+    assert(strstr(buf, "\"obd_profile\":\"fleet_basic\"") != NULL);
 
-    /* Stale speed (ok but old) must also be omitted. */
+    /* Stale speed omitted. */
     snap.speed.valid = true;
     snap.speed.ok = true;
     snap.speed.value = 255;
     snap.speed.age_ms = 20000;
     snprintf(snap.speed.raw, sizeof(snap.speed.raw), "%s", "410DFF");
-    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    n = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"speed_kmh\"") == NULL);
     assert(strstr(buf, "\"speed_ok\":false") != NULL);
@@ -60,36 +78,30 @@ int main(void)
     snap.speed.age_ms = 100;
     snap.speed.value = 0;
     snprintf(snap.speed.raw, sizeof(snap.speed.raw), "%s", "410D00");
-    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    n = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "\"speed_kmh\":0") != NULL);
     assert(strstr(buf, "\"speed_ok\":true") != NULL);
 
-    char payload[1800];
-    int pn = uplink_payload_build_payload(&snap, payload, sizeof(payload));
-    assert(pn > 0);
-    assert(payload[0] == '{');
-    assert(strstr(payload, "schemaId") == NULL);
+    char queued[768];
+    int qn = uplink_event_serialize_queued(&events[0], 12345ULL, queued, sizeof(queued));
+    assert(qn > 0);
+    assert(strstr(queued, "\"queued_at_ms\":12345") != NULL);
+    assert(strstr(queued, "\"schemaId\":\"1087\"") != NULL);
 
-    char event[1900];
-    int en = uplink_payload_build_queued_event(payload, 12345ULL, event, sizeof(event));
-    assert(en > 0);
-    assert(strstr(event, "\"queued_at_ms\":12345") != NULL);
-    assert(strstr(event, "\"payload\":{") != NULL);
-
-    char line2[1900];
-    assert(uplink_payload_build_queued_event(payload, 67890ULL, line2, sizeof(line2)) > 0);
-    char blob[4000];
-    snprintf(blob, sizeof(blob), "%s\n%s", event, line2);
-    char batch[4500];
-    int bn = uplink_payload_build_batch(blob, 2, NULL, batch, sizeof(batch));
+    char queued2[768];
+    assert(uplink_event_serialize_queued(&events[0], 67890ULL, queued2, sizeof(queued2)) > 0);
+    char blob[2000];
+    snprintf(blob, sizeof(blob), "%s\n%s", queued, queued2);
+    char batch[2500];
+    int bn = uplink_payload_build_batch(blob, 2, batch, sizeof(batch));
     assert(bn > 0);
     assert(batch[0] == '[');
     assert(batch[bn - 1] == ']');
-    assert(strstr(batch, "\"events\"") == NULL);
     assert(strstr(batch, "\"queued_at_ms\"") == NULL);
-    assert(strstr(batch, "{\"schemaId\":\"1087\",\"payload\":{") != NULL);
-    /* One schemaId wrapper per queued event. */
+    assert(strstr(batch, "\"device_id\":\"carrier-042\"") != NULL);
     {
         int schema_n = 0;
         for (const char *s = batch; (s = strstr(s, "\"schemaId\":\"1087\"")) != NULL; s += 8) {
@@ -98,43 +110,44 @@ int main(void)
         assert(schema_n == 2);
     }
 
+    /* GPS as separate virtual-device event. */
     snap.gps_ok = true;
     snap.lat = 12.9716;
     snap.lng = 77.5946;
-    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    emit.include_gps = true;
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    assert(count == 2);
+    n = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(n > 0);
-    assert(strstr(buf, "\"gps_ok\":true") != NULL);
+    assert(buf[0] == '[');
+    assert(strstr(buf, "\"schemaId\":\"1089\"") != NULL);
+    assert(strstr(buf, "\"device_id\":\"gps-042\"") != NULL);
+    assert(strstr(buf, "\"node_id\":\"node-gps-042\"") != NULL);
     assert(strstr(buf, "\"lat\":12.9716") != NULL || strstr(buf, "\"lat\":12.971") != NULL);
     assert(strstr(buf, "\"lng\":77.5946") != NULL || strstr(buf, "\"lng\":77.594") != NULL);
-    /* Must be inside payload, not next to schemaId only */
-    assert(strstr(buf, "\"payload\":{") != NULL);
+    assert(strstr(buf, "\"source\":\"esp32_obd\"") != NULL);
 
-    pn = uplink_payload_build_payload(&snap, payload, sizeof(payload));
-    assert(pn > 0);
-    assert(strstr(payload, "\"gps_ok\":true") != NULL);
-    assert(strstr(payload, "\"lat\":") != NULL);
-    assert(strstr(payload, "\"lng\":") != NULL);
-    assert(uplink_payload_build_queued_event(payload, 1ULL, event, sizeof(event)) > 0);
-    bn = uplink_payload_build_batch(event, 1, NULL, batch, sizeof(batch));
-    assert(bn > 0);
-    assert(batch[0] == '[');
-    assert(strstr(batch, "\"gps_ok\":true") != NULL);
-    assert(strstr(batch, "\"lat\":") != NULL);
-    assert(strstr(batch, "\"lng\":") != NULL);
-    assert(strstr(batch, "\"source\":\"esp32_obd\"") != NULL);
-
-    snap.gps_ok = false;
-    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    /* Single GPS-only event is a bare object, not an array. */
+    emit.include_obd = false;
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    assert(count == 1);
+    n = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(n > 0);
-    assert(strstr(buf, "\"gps_ok\":false") != NULL);
-    assert(strstr(buf, "\"lat\":") == NULL);
-    assert(strstr(buf, "\"lng\":") == NULL);
+    assert(buf[0] == '{');
+    assert(buf[0] != '[');
 
+    /* Host readings split into one event per valid reading. */
+    fill_base_snapshot(&snap);
+    snap.gps_ok = false;
+    emit.include_obd = false;
+    emit.include_gps = false;
     snap.host_count = 1;
     snprintf(snap.hosts[0].device_id, sizeof(snap.hosts[0].device_id), "%s", "ul212-001");
     snprintf(snap.hosts[0].host_type, sizeof(snap.hosts[0].host_type), "%s", "ul212_ble_fetch");
     snap.hosts[0].host_type_id = 1;
-    snap.hosts[0].ts_ms = 1710000001000ULL;
+    snap.hosts[0].ts_ms = 1710000001100ULL;
     snap.hosts[0].reading_count = 2;
     snprintf(snap.hosts[0].readings[0].key, sizeof(snap.hosts[0].readings[0].key), "%s",
              "height_mm");
@@ -145,17 +158,21 @@ int main(void)
              "signal");
     snap.hosts[0].readings[1].value = 85;
     snprintf(snap.hosts[0].readings[1].unit, sizeof(snap.hosts[0].readings[1].unit), "%s", "");
-    snap.hosts[0].readings[1].valid = true;
-    n = uplink_payload_build(&snap, NULL, buf, sizeof(buf));
+    snap.hosts[0].readings[1].valid = false;
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    assert(count == 1);
+    n = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(n > 0);
-    assert(strstr(buf, "\"hosts\":[") != NULL);
-    assert(strstr(buf, "\"height_mm\"") != NULL);
+    assert(strstr(buf, "\"schemaId\":\"1088\"") != NULL);
     assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
+    assert(strstr(buf, "\"node_id\":\"node-ul212-001\"") != NULL);
+    assert(strstr(buf, "\"height_mm\"") != NULL);
+    assert(strstr(buf, "\"hosts\":[") == NULL);
 
     assert(uplink_should_enqueue(true, false) == true);
     assert(uplink_should_enqueue(false, true) == true);
-    assert(uplink_should_enqueue(true, true) == true);
-    assert(uplink_should_enqueue(false, false) == false);
+    assert(uplink_tick_worth_producing(false, false, false, &snap) == true);
 
     {
         double d = uplink_gps_distance_m(12.9716, 77.5946, 12.9721, 77.5946);
@@ -169,6 +186,17 @@ int main(void)
         assert(uplink_gps_only_worth_sending(true, 12.9716, 77.5946, 1000, 12.9721, 77.5946,
                                              2000) == true);
     }
+
+    char gps_dev[40];
+    char gps_node[40];
+    uplink_virtual_gps_ids("carrier-042", "node-042", gps_dev, sizeof(gps_dev), gps_node,
+                           sizeof(gps_node));
+    assert(strcmp(gps_dev, "gps-042") == 0);
+    assert(strcmp(gps_node, "node-gps-042") == 0);
+
+    uplink_event_t bad = events[0];
+    bad.device_id[0] = '\0';
+    assert(uplink_event_serialize(&bad, buf, sizeof(buf)) < 0);
 
     printf("test_uplink_payload: PASS\n");
     return 0;

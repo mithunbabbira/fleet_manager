@@ -67,6 +67,27 @@ typedef struct {
  */
 esp_err_t net_lte_gps_get(net_lte_gps_t *out);
 
+typedef enum {
+    NET_LTE_TIME_NONE = 0,
+    NET_LTE_TIME_CCLK,
+    NET_LTE_TIME_GPS,
+} net_lte_time_source_t;
+
+typedef struct {
+    bool time_ok;
+    uint64_t epoch_ms_utc;
+    net_lte_time_source_t source;
+} net_lte_time_t;
+
+/**
+ * @brief Wall-clock UTC epoch ms extrapolated from last modem sync; 0 if unsynced.
+ * @note telemetry_uplink falls back to esp_timer uptime when this returns 0.
+ */
+uint64_t net_lte_time_now_ms(void);
+
+/** @brief Snapshot of wall-clock sync state. */
+esp_err_t net_lte_time_get(net_lte_time_t *out);
+
 typedef struct {
     int http_status; /* 0 if unknown / transport failed before status */
     char error[96];

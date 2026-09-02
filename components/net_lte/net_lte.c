@@ -3,6 +3,9 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_private/uart_share_hw_ctrl.h"
+#include "hal/uart_ll.h"
+#include "soc/soc_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -17,7 +20,7 @@ static const char *TAG = "net_lte";
 #if CONFIG_NET_LTE_ENABLE
 
 /* Modem can take several seconds to boot; retry AT for up to this long. */
-#define NET_LTE_AT_ATTEMPTS   40
+#define NET_LTE_AT_ATTEMPTS   60
 #define NET_LTE_AT_INTERVAL_MS 500
 
 static net_lte_status_t s_status;
@@ -26,6 +29,20 @@ static SemaphoreHandle_t s_uart_mutex;
 /* When true, gps_task skips AT so OTA QHTTP streams own the UART cleanly. */
 static volatile bool s_suspend_bg_at;
 static TaskHandle_t s_bringup_task;
+
+/* Wall-clock cache: UTC epoch ms at sync + monotonic anchor for extrapolation. */
+static SemaphoreHandle_t s_time_mutex;
+static bool s_time_valid;
+static int64_t s_time_epoch_ms_utc;
+static int64_t s_time_mono_ms;
+static net_lte_time_source_t s_time_source;
+static int64_t s_last_cclk_query_ms;
+
+#define NET_LTE_CCLK_MIN_INTERVAL_MS (30 * 60 * 1000LL)
+/* Retry sooner while the clock is still unset. */
+#define NET_LTE_CCLK_RETRY_MS        (60 * 1000LL)
+/* India has a single timezone (UTC+5:30) and no DST; CCLK reports it as +22. */
+#define NET_LTE_TZ_QUARTERS_IST      22
 
 #if CONFIG_NET_LTE_GPS_ENABLE
 /* GNSS cache, protected by its own mutex (independent of modem UART traffic
@@ -36,7 +53,212 @@ static double s_gps_lat, s_gps_lng;
 static int64_t s_gps_fix_ms; /* esp_timer ms when last good fix stored */
 static TaskHandle_t s_gps_task;
 static void gps_task(void *arg);
+static void gps_task_start(void);
 #endif
+
+static esp_err_t at_transact(const char *cmd, char *resp, size_t resp_len, int timeout_ms);
+
+/** @brief Gregorian UTC datetime → Unix epoch ms (no libc TZ). */
+static int64_t utc_datetime_to_epoch_ms(int year, int month, int day, int hour, int minute,
+                                        int second)
+{
+    if (year < 2000 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+        return -1;
+    }
+    int y = year;
+    int m = month;
+    if (m <= 2) {
+        y -= 1;
+        m += 12;
+    }
+    int era = y / 400;
+    int yoe = y - era * 400;
+    int doy = (153 * (m - 3) + 2) / 5 + day - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t days = (int64_t)era * 146097 + doe - 719468;
+    int64_t secs = days * 86400LL + (int64_t)hour * 3600LL + (int64_t)minute * 60LL + second;
+    return secs * 1000LL;
+}
+
+/* Plausible window for a fielded device; rejects garbage AT parses. */
+#define NET_LTE_TIME_MIN_EPOCH_MS 1735689600000LL /* 2025-01-01 UTC */
+#define NET_LTE_TIME_MAX_EPOCH_MS 4102444800000LL /* 2100-01-01 UTC */
+
+static void time_apply_sync_locked(int64_t epoch_ms_utc, net_lte_time_source_t source)
+{
+    if (epoch_ms_utc < NET_LTE_TIME_MIN_EPOCH_MS || epoch_ms_utc > NET_LTE_TIME_MAX_EPOCH_MS) {
+        return;
+    }
+    /* GPS is unambiguous UTC; network CCLK depends on the operator reporting a
+     * timezone. Once GPS has set the clock, don't let CCLK move it. */
+    if (s_time_valid && s_time_source == NET_LTE_TIME_GPS && source == NET_LTE_TIME_CCLK) {
+        return;
+    }
+    bool was_valid = s_time_valid;
+    net_lte_time_source_t prev = s_time_source;
+    s_time_valid = true;
+    s_time_epoch_ms_utc = epoch_ms_utc;
+    s_time_mono_ms = esp_timer_get_time() / 1000;
+    s_time_source = source;
+    if (!was_valid || prev != source) {
+        ESP_LOGI(TAG, "time sync via %s", source == NET_LTE_TIME_CCLK ? "CCLK" : "GPS");
+    }
+}
+
+static void time_apply_sync(int64_t epoch_ms_utc, net_lte_time_source_t source)
+{
+    if (s_time_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    time_apply_sync_locked(epoch_ms_utc, source);
+    xSemaphoreGive(s_time_mutex);
+}
+
+/**
+ * @brief Parse +CCLK local/UTC time; India networks typically report +22 (IST).
+ * @note One AT query per refresh interval — low UART load.
+ */
+static bool time_parse_cclk(const char *resp, int64_t *epoch_ms_utc_out)
+{
+    const char *p = strstr(resp, "+CCLK:");
+    if (p == NULL) {
+        return false;
+    }
+    p = strchr(p, '"');
+    if (p == NULL) {
+        return false;
+    }
+    p++;
+    int yy = 0;
+    int mo = 0;
+    int dd = 0;
+    int hh = 0;
+    int mi = 0;
+    int ss = 0;
+    if (sscanf(p, "%d/%d/%d,%d:%d:%d", &yy, &mo, &dd, &hh, &mi, &ss) != 6) {
+        return false;
+    }
+    if (yy < 100) {
+        yy += 2000;
+    }
+    /* Quarter-hour offset, e.g. "+22" = IST. Some operators omit it; this unit
+     * only ships in India, so assume IST rather than storing local time as UTC. */
+    int tz_q = NET_LTE_TZ_QUARTERS_IST;
+    const char *tzp = strrchr(p, '+');
+    if (tzp == NULL) {
+        tzp = strrchr(p, '-');
+        if (tzp != NULL) {
+            tz_q = -atoi(tzp + 1);
+        }
+    } else {
+        tz_q = atoi(tzp + 1);
+    }
+    int64_t epoch_ms = utc_datetime_to_epoch_ms(yy, mo, dd, hh, mi, ss);
+    if (epoch_ms < 0) {
+        return false;
+    }
+  /* Local = UTC + tz_q * 15 min → UTC = local - offset */
+    epoch_ms -= (int64_t)tz_q * 15LL * 60LL * 1000LL;
+    *epoch_ms_utc_out = epoch_ms;
+    return true;
+}
+
+/** @brief One AT+CCLK? query; true when a usable time was parsed. */
+static bool time_try_cclk(void)
+{
+    char resp[96];
+    if (at_transact("AT+CCLK?", resp, sizeof(resp), 2000) != ESP_OK) {
+        return false;
+    }
+    int64_t epoch_ms = 0;
+    if (!time_parse_cclk(resp, &epoch_ms)) {
+        return false;
+    }
+    time_apply_sync(epoch_ms, NET_LTE_TIME_CCLK);
+    return true;
+}
+
+/**
+ * @brief Query CCLK when due; honors OTA suspend. Cheap to call often.
+ * @note An unregistered modem reports a 1980-ish date, which the plausibility
+ *       check in time_apply_sync_locked rejects — no registration gate needed.
+ */
+static void time_maintain_cclk(void)
+{
+    if (s_suspend_bg_at) {
+        return;
+    }
+    bool synced = false;
+    if (s_time_mutex != NULL && xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        synced = s_time_valid;
+        xSemaphoreGive(s_time_mutex);
+    }
+    int64_t mono = esp_timer_get_time() / 1000;
+    int64_t due = synced ? NET_LTE_CCLK_MIN_INTERVAL_MS : NET_LTE_CCLK_RETRY_MS;
+    if (s_last_cclk_query_ms != 0 && (mono - s_last_cclk_query_ms) < due) {
+        return;
+    }
+    s_last_cclk_query_ms = mono;
+    (void)time_try_cclk();
+}
+
+/** @brief Read epoch + source together so they can never disagree. */
+static bool time_snapshot(uint64_t *epoch_ms_out, net_lte_time_source_t *source_out)
+{
+    if (s_time_mutex == NULL) {
+        return false;
+    }
+    if (xSemaphoreTake(s_time_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    bool ok = s_time_valid;
+    int64_t now = 0;
+    net_lte_time_source_t source = s_time_source;
+    if (ok) {
+        int64_t delta = (esp_timer_get_time() / 1000) - s_time_mono_ms;
+        if (delta < 0) {
+            delta = 0;
+        }
+        now = s_time_epoch_ms_utc + delta;
+    }
+    xSemaphoreGive(s_time_mutex);
+    if (!ok || now <= 0) {
+        return false;
+    }
+    if (epoch_ms_out) {
+        *epoch_ms_out = (uint64_t)now;
+    }
+    if (source_out) {
+        *source_out = source;
+    }
+    return true;
+}
+
+uint64_t net_lte_time_now_ms(void)
+{
+    uint64_t now = 0;
+    return time_snapshot(&now, NULL) ? now : 0;
+}
+
+esp_err_t net_lte_time_get(net_lte_time_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    uint64_t now = 0;
+    net_lte_time_source_t source = NET_LTE_TIME_NONE;
+    if (time_snapshot(&now, &source)) {
+        out->time_ok = true;
+        out->epoch_ms_utc = now;
+        out->source = source;
+    }
+    return ESP_OK;
+}
 
 /**
  * @brief Raw AT write + collect until OK/ERROR/READY or timeout (caller holds UART mutex).
@@ -120,16 +342,34 @@ static esp_err_t uart_init(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
+    /* ESP32-C6: Zigbee/coex can leave UART1 core clock off; driver install hangs without this. */
+    if (CONFIG_NET_LTE_UART_PORT < SOC_UART_HP_NUM) {
+        HP_UART_BUS_CLK_ATOMIC() {
+            uart_ll_enable_bus_clock(CONFIG_NET_LTE_UART_PORT, true);
+        }
+        HP_UART_SRC_CLK_ATOMIC() {
+            uart_dev_t *hw = UART_LL_GET_HW(CONFIG_NET_LTE_UART_PORT);
+            uart_ll_sclk_enable(hw);
+            uart_ll_set_sclk(hw, UART_SCLK_DEFAULT);
+        }
+    }
+
     esp_err_t err = uart_driver_install(CONFIG_NET_LTE_UART_PORT, 16384, 0, 0, NULL, 0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
-    ESP_ERROR_CHECK(uart_param_config(CONFIG_NET_LTE_UART_PORT, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(CONFIG_NET_LTE_UART_PORT,
-                                 CONFIG_NET_LTE_UART_TX_GPIO,
-                                 CONFIG_NET_LTE_UART_RX_GPIO,
-                                 UART_PIN_NO_CHANGE,
-                                 UART_PIN_NO_CHANGE));
+    err = uart_param_config(CONFIG_NET_LTE_UART_PORT, &cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = uart_set_pin(CONFIG_NET_LTE_UART_PORT,
+                       CONFIG_NET_LTE_UART_TX_GPIO,
+                       CONFIG_NET_LTE_UART_RX_GPIO,
+                       UART_PIN_NO_CHANGE,
+                       UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) {
+        return err;
+    }
     s_uart_ready = true;
     ESP_LOGI(TAG, "UART%d ready TX=GPIO%d RX=GPIO%d baud=%d",
              CONFIG_NET_LTE_UART_PORT,
@@ -176,6 +416,10 @@ static void bringup_task(void *arg)
 
     s_status.uart_ok = true;
 
+#if CONFIG_NET_LTE_GPS_ENABLE
+    gps_task_start();
+#endif
+
     if (at_transact("ATI", resp, sizeof(resp), 1500) == ESP_OK) {
         const char *p = strstr(resp, "EC200");
         if (p == NULL) {
@@ -218,6 +462,13 @@ esp_err_t net_lte_start(void)
             return ESP_ERR_NO_MEM;
         }
     }
+    if (s_time_mutex == NULL) {
+        s_time_mutex = xSemaphoreCreateMutex();
+        if (s_time_mutex == NULL) {
+            strncpy(s_status.last_error, "time mutex alloc failed", sizeof(s_status.last_error) - 1);
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     esp_err_t err = uart_init();
     if (err != ESP_OK) {
@@ -225,18 +476,6 @@ esp_err_t net_lte_start(void)
         ESP_LOGE(TAG, "%s: %s", s_status.last_error, esp_err_to_name(err));
         return err;
     }
-
-#if CONFIG_NET_LTE_GPS_ENABLE
-    if (s_gps_mutex == NULL) {
-        s_gps_mutex = xSemaphoreCreateMutex();
-    }
-    if (s_gps_mutex != NULL && s_gps_task == NULL) {
-        if (xTaskCreate(gps_task, "lte_gps", 4096, NULL, 3, &s_gps_task) != pdPASS) {
-            ESP_LOGW(TAG, "gps task spawn failed; lat/lng will stay unavailable");
-            s_gps_task = NULL;
-        }
-    }
-#endif
 
     if (s_bringup_task != NULL) {
         ESP_LOGW(TAG, "bring-up already running");
@@ -297,6 +536,10 @@ esp_err_t net_lte_refresh(void)
     if (!s_uart_ready) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (s_suspend_bg_at) {
+        /* OTA owns the UART for minutes — don't queue AT behind it. */
+        return ESP_ERR_INVALID_STATE;
+    }
 
     char resp[160];
     if (at_transact("AT+CPIN?", resp, sizeof(resp), 2000) == ESP_OK) {
@@ -323,6 +566,7 @@ esp_err_t net_lte_refresh(void)
             s_status.attached = (atoi(p + 7) == 1) || strstr(p, "1") != NULL;
         }
     }
+    time_maintain_cclk();
     return ESP_OK;
 }
 
@@ -330,8 +574,7 @@ esp_err_t net_lte_refresh(void)
 /*
  * Parse "+QGPSLOC: <utc>,<lat>,<lng>,<hdop>,<alt>,<fix>,<cog>,<spkm>,<spkn>,
  * <date>,<nsat>" as returned by `AT+QGPSLOC=2` (decimal-degree mode) on the
- * EC200U. Field 0 is UTC time (skipped), field 1 is latitude, field 2 is
- * longitude — both signed decimal degrees, e.g. "11.05507,76.94632".
+ * EC200U. Field 0 is UTC (HHMMSS.ss), field 9 is date (DDMMYY).
  * Verified against Quectel EC200U/EG915U GNSS application-note examples;
  * adjust indices here if a different firmware/URC layout is seen in the field.
  */
@@ -352,6 +595,29 @@ static bool parse_qgpsloc(const char *resp, double *lat_out, double *lng_out)
     }
     if (lng_out) {
         *lng_out = lng;
+    }
+
+    /* Best-effort wall clock from the same reply; never affects the fix result. */
+    int hh = 0;
+    int mi = 0;
+    int ss = 0;
+    if (sscanf(p, " %2d%2d%2d", &hh, &mi, &ss) == 3) {
+        const char *date_p = p;
+        for (int field = 0; field < 9 && date_p != NULL; field++) {
+            date_p = strchr(date_p, ',');
+            if (date_p != NULL) {
+                date_p++;
+            }
+        }
+        int dd = 0;
+        int mo = 0;
+        int yy = 0;
+        if (date_p != NULL && sscanf(date_p, "%2d%2d%2d", &dd, &mo, &yy) == 3) {
+            int64_t epoch_ms = utc_datetime_to_epoch_ms(yy + 2000, mo, dd, hh, mi, ss);
+            if (epoch_ms >= 0) {
+                time_apply_sync(epoch_ms, NET_LTE_TIME_GPS);
+            }
+        }
     }
     return true;
 }
@@ -388,6 +654,21 @@ void net_lte_suspend_bg_at(bool suspend)
         ESP_LOGI(TAG, "background AT resumed");
     }
 }
+
+#if CONFIG_NET_LTE_GPS_ENABLE
+static void gps_task_start(void)
+{
+    if (s_gps_mutex == NULL) {
+        s_gps_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_gps_mutex != NULL && s_gps_task == NULL) {
+        if (xTaskCreate(gps_task, "lte_gps", 4096, NULL, 3, &s_gps_task) != pdPASS) {
+            ESP_LOGW(TAG, "gps task spawn failed; lat/lng will stay unavailable");
+            s_gps_task = NULL;
+        }
+    }
+}
+#endif
 
 /**
  * @brief Enable GNSS with backoff, then poll QGPSLOC; honors s_suspend_bg_at.
@@ -460,6 +741,8 @@ static void gps_task(void *arg)
                 }
             }
         }
+        /* Self-throttled; keeps the wall clock alive indoors with no fix. */
+        time_maintain_cclk();
         vTaskDelay(pdMS_TO_TICKS(CONFIG_NET_LTE_GPS_REFRESH_S * 1000));
     }
 }
@@ -1495,6 +1778,21 @@ esp_err_t net_lte_reconnect(void)
 
 /** @brief Stub: empty GPS (gps_ok false). */
 esp_err_t net_lte_gps_get(net_lte_gps_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    return ESP_OK;
+}
+
+/** @brief Stub: no wall-clock sync. */
+uint64_t net_lte_time_now_ms(void)
+{
+    return 0;
+}
+
+esp_err_t net_lte_time_get(net_lte_time_t *out)
 {
     if (out == NULL) {
         return ESP_ERR_INVALID_ARG;

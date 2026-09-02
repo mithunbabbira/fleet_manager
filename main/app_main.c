@@ -103,9 +103,21 @@ void app_main(void)
     ESP_ERROR_CHECK(telemetry_bus_init());
     ESP_LOGI(TAG, "telemetry_bus ready");
 
-    ESP_ERROR_CHECK(transport_zigbee_init());
-    ESP_ERROR_CHECK(transport_zigbee_start());
-    ESP_LOGI(TAG, "transport_zigbee ready");
+    /* Optional sensor hosts: a radio failure must not stop vehicle telemetry. */
+    {
+        esp_err_t zb_err = transport_zigbee_init();
+        if (zb_err == ESP_OK) {
+            zb_err = transport_zigbee_start();
+        }
+        if (zb_err == ESP_OK) {
+            ESP_LOGI(TAG, "transport_zigbee ready");
+        } else if (zb_err == ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGI(TAG, "transport_zigbee disabled");
+        } else {
+            ESP_LOGW(TAG, "transport_zigbee: %s (continuing without hosts)",
+                     esp_err_to_name(zb_err));
+        }
+    }
 
     /*
      * LTE (EC200U on UART1: GPIO16 TX / GPIO17 RX).
@@ -143,8 +155,14 @@ void app_main(void)
         ESP_LOGE(TAG, "can_obd_init: %s — check MCP2515 wiring/power",
                  esp_err_to_name(err));
     } else {
-        ESP_ERROR_CHECK(can_obd_start());
-        ESP_LOGI(TAG, "can_obd started (protocol autodetect)");
+        esp_err_t can_err = can_obd_start();
+        if (can_err == ESP_OK) {
+            ESP_LOGI(TAG, "can_obd started (protocol autodetect)");
+        } else {
+            /* GPS/LTE telemetry still has value without the vehicle bus. */
+            ESP_LOGE(TAG, "can_obd_start: %s (continuing without OBD)",
+                     esp_err_to_name(can_err));
+        }
     }
 
     /* microSD on shared SPI2 (CS GPIO18). Non-fatal if missing. */

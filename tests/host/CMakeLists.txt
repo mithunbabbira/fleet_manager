@@ -22,6 +22,7 @@ target_link_libraries(test_obd_codec m)
 add_executable(test_uplink_payload
     test_uplink_payload.c
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
+    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_schema.c
 )
 target_include_directories(test_uplink_payload PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
@@ -36,22 +37,32 @@ target_include_directories(test_obd_isotp PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/can_obd/include
 )
 
-add_executable(test_fw_ota_lte_parse
-    test_fw_ota_lte_parse.c
-    ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/fw_ota_lte_parse.c
-    $ENV{IDF_PATH}/components/json/cJSON/cJSON.c
-)
-target_include_directories(test_fw_ota_lte_parse PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/include
-    $ENV{IDF_PATH}/components/json/cJSON
-)
+# Needs cJSON from ESP-IDF. Skipped (with a warning) when IDF_PATH is unset so
+# the rest of the suite still runs on a bare host.
+set(CJSON_SRC "$ENV{IDF_PATH}/components/json/cJSON/cJSON.c")
+if(DEFINED ENV{IDF_PATH} AND EXISTS "${CJSON_SRC}")
+    add_executable(test_fw_ota_lte_parse
+        test_fw_ota_lte_parse.c
+        ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/fw_ota_lte_parse.c
+        ${CJSON_SRC}
+    )
+    target_include_directories(test_fw_ota_lte_parse PRIVATE
+        ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/include
+        $ENV{IDF_PATH}/components/json/cJSON
+    )
+else()
+    message(WARNING "IDF_PATH not set — skipping test_fw_ota_lte_parse (needs cJSON). "
+                    "Run 'source ~/esp/esp-idf/export.sh' to include it.")
+endif()
 
 enable_testing()
 add_test(NAME test_cmd_policy COMMAND test_cmd_policy)
 add_test(NAME test_obd_codec COMMAND test_obd_codec)
 add_test(NAME test_uplink_payload COMMAND test_uplink_payload)
 add_test(NAME test_obd_isotp COMMAND test_obd_isotp)
-add_test(NAME test_fw_ota_lte_parse COMMAND test_fw_ota_lte_parse)
+if(TARGET test_fw_ota_lte_parse)
+    add_test(NAME test_fw_ota_lte_parse COMMAND test_fw_ota_lte_parse)
+endif()
 
 add_executable(test_fleet_tlv
     test_fleet_tlv.c
@@ -83,6 +94,7 @@ add_executable(test_fleet_uplink_path
     ${CMAKE_SOURCE_DIR}/../../components/host_registry/host_registry.c
     ${CMAKE_SOURCE_DIR}/../../components/host_registry/fleet_manifest_catalog.c
     ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
+    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_schema.c
 )
 target_include_directories(test_fleet_uplink_path PRIVATE
     ${CMAKE_SOURCE_DIR}/shims

@@ -63,10 +63,19 @@ static fleet_registry_host_t *find_or_alloc_host(const char *device_id, uint16_t
             return &s_registry.hosts[i];
         }
     }
+    fleet_registry_host_t *h;
     if (s_registry.host_count >= FLEET_REGISTRY_MAX_HOSTS) {
-        return NULL;
+        /* Table full: recycle the least-recently-seen slot so a replaced or
+         * re-provisioned host can never be locked out until reboot. */
+        h = &s_registry.hosts[0];
+        for (uint8_t i = 1; i < s_registry.host_count; i++) {
+            if (s_registry.hosts[i].last_seen_ms < h->last_seen_ms) {
+                h = &s_registry.hosts[i];
+            }
+        }
+    } else {
+        h = &s_registry.hosts[s_registry.host_count++];
     }
-    fleet_registry_host_t *h = &s_registry.hosts[s_registry.host_count++];
     memset(h, 0, sizeof(*h));
     strncpy(h->device_id, device_id, sizeof(h->device_id) - 1);
     h->host_type_id = host_type_id;

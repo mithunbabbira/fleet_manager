@@ -1,6 +1,7 @@
 #include "fleet_tlv.h"
 #include "host_registry.h"
 #include "uplink_payload.h"
+#include "uplink_schema.h"
 
 #ifdef HOST_REGISTRY_HOST_TEST
 #include "telemetry_bus_shim.h"
@@ -25,7 +26,7 @@ esp_err_t telemetry_publish(const telemetry_msg_t *msg)
     return 0;
 }
 
-/* End-to-end path without radio: TLV REPORT -> registry -> uplink JSON hosts[]. */
+/* End-to-end path without radio: TLV REPORT -> registry -> uplink host events. */
 
 int main(void)
 {
@@ -57,6 +58,8 @@ int main(void)
     uplink_snapshot_t snap;
     memset(&snap, 0, sizeof(snap));
     snprintf(snap.device_id, sizeof(snap.device_id), "%s", "carrier-001");
+    snprintf(snap.node_id, sizeof(snap.node_id), "%s", "node-001");
+    snap.ts_ms = 6000;
     snap.host_count = reg.host_count;
     for (uint8_t i = 0; i < reg.host_count && i < UPLINK_MAX_HOSTS; i++) {
         const fleet_registry_host_t *h = &reg.hosts[i];
@@ -74,14 +77,27 @@ int main(void)
         }
     }
 
+    uplink_emit_ctx_t emit = {
+        .include_obd = false,
+        .include_gps = false,
+        .obd_schema_id = NULL,
+    };
+    uplink_event_t events[UPLINK_MAX_EVENTS_PER_TICK];
+    uint8_t count = 0;
+    assert(uplink_events_from_snapshot(&snap, &emit, events, UPLINK_MAX_EVENTS_PER_TICK,
+                                       &count) == 0);
+    assert(count >= 1);
+
     char buf[2048];
-    int jn = uplink_payload_build_payload(&snap, buf, sizeof(buf));
+    int jn = uplink_events_serialize_live(events, count, buf, sizeof(buf));
     assert(jn > 0);
-    assert(strstr(buf, "\"hosts\":[") != NULL);
+    assert(strstr(buf, "\"schemaId\":\"1088\"") != NULL);
     assert(strstr(buf, "\"height_mm\"") != NULL);
+    assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
     assert(reg.hosts[0].readings[0].valid);
     assert(reg.hosts[0].readings[0].value > 40.8 && reg.hosts[0].readings[0].value < 41.0);
     assert(strstr(buf, "\"value\":") != NULL);
+    assert(strstr(buf, "\"hosts\":[") == NULL);
 
     printf("test_fleet_uplink_path: PASS\n");
     return 0;
