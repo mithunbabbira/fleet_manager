@@ -12,14 +12,14 @@ Clean rewrite of the fleet telematics stack. The legacy tree (`components/`, roo
 ## Milestone roadmap
 
 1. **M1 (done):** master boot, dual-bank OTA, LTE HTTP GET/POST, Trafyn get-latest OTA, host HOWTO only  
-2. **M2 (next):** GPS + time — see `docs/superpowers/specs/2026-09-04-firmware-v2-milestone2-design.md`  
+2. **M2 (current):** on-modem GPS, LTE-synchronized time, USB status/GPS CLI, and OTA-safe background polling — see `docs/superpowers/specs/2026-09-04-firmware-v2-milestone2-design.md`
 3. **M3:** SD store-on-fail queue  
 4. **M4:** OBD / MCP2515  
 5. **M5:** Zigbee coordinator + dynamic hosts + JSON 1087 / 1088 / 1089 uplink  
 
 JSON envelope (unchanged plan): top-level `device_id`, `node_id`, `schemaId`, `ts_ms`, `payload`.
 
-## Build master (M1)
+## Build master (M2)
 
 ```bash
 cd firmware_v2/master
