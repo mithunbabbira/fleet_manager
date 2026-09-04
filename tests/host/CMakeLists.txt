@@ -115,3 +115,20 @@ target_include_directories(test_net_lte_time PRIVATE
     ${CMAKE_SOURCE_DIR}/../../components/net_lte/include
 )
 add_test(NAME test_net_lte_time COMMAND test_net_lte_time)
+
+configure_file(
+    ${CMAKE_SOURCE_DIR}/shims/esp_shim.h
+    ${CMAKE_CURRENT_BINARY_DIR}/shims/esp_err.h
+    COPYONLY
+)
+add_executable(test_cli_format_v2
+    test_cli_format_v2.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/cli/cli_format.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/lte/lte_time.c
+)
+target_include_directories(test_cli_format_v2 PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/shims
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/cli/include
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/lte/include
+)
+add_test(NAME test_cli_format_v2 COMMAND test_cli_format_v2)
