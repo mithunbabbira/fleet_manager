@@ -18,6 +18,9 @@ const carrier = {
   zigbee: null,
   zigbeeReports: null,
   uplink: null,
+  gps: null,
+  uplinkLast: null,
+  sdQueue: null,
 };
 
 const HOST_STALE_MS = 20000;
@@ -85,6 +88,28 @@ function isHostOnline(h) {
   return age <= HOST_STALE_MS;
 }
 
+function envelopeOrDash(v) {
+  return v && String(v).trim() ? String(v).trim() : "—";
+}
+
+function formatEnvelope(h) {
+  return `node=${envelopeOrDash(h.node_id)} · schema=${envelopeOrDash(h.schema_id)}`;
+}
+
+function readingsSummary(readings) {
+  const r = readings || {};
+  const keys = Object.keys(r);
+  if (!keys.length) return "—";
+  return keys
+    .slice(0, 6)
+    .map((k) => {
+      const item = r[k];
+      const unit = item.unit ? ` ${item.unit}` : "";
+      return `${k}=${item.value}${unit}`;
+    })
+    .join(", ");
+}
+
 function fmtReportAge(lastSeenMs) {
   const age = hostReportAgeMs(lastSeenMs);
   if (age == null) return "unknown";
@@ -102,6 +127,7 @@ function renderCarrierKv() {
   if (carrier.zigbeeReports != null) zbParts.push(`${carrier.zigbeeReports} reports`);
   $("kvZigbee").textContent = zbParts.length ? zbParts.join(" · ") : "—";
   $("kvUplink").textContent = carrier.uplink || "—";
+  renderDiagnostics();
 }
 
 function renderHosts() {
@@ -112,6 +138,7 @@ function renderHosts() {
   if (!snap) {
     pill.textContent = "—";
     pill.className = "pill";
+    renderDiagnostics();
     return;
   }
 
@@ -128,12 +155,14 @@ function renderHosts() {
         ? "Carrier just rebooted — Zigbee registry is empty until the UL212 host rejoins (watch for <code>host joined</code> in the log)."
         : "No Zigbee hosts in registry. Power the UL212 host after the carrier and wait for <code>[zb] joined</code> on the host serial.";
     list.innerHTML = `<p class="empty-hint">${waiting}</p>`;
+    renderDiagnostics();
     return;
   }
 
   if (snap.hosts.length < total) {
     list.innerHTML =
       `<p class="empty-hint">Registry reports ${total} host(s) but serial output was incomplete — click <strong>Refresh hosts</strong>.</p>`;
+    renderDiagnostics();
     return;
   }
 
@@ -165,6 +194,7 @@ function renderHosts() {
           </div>
           <span class="host-link ${statusClass}">${statusLabel}</span>
         </div>
+        <p class="host-envelope">${formatEnvelope(h)}</p>
         <div class="readings">
           ${chip("height_mm", "Fuel height", true)}
           ${chip("smooth_mm", "Smooth", false)}
@@ -177,6 +207,167 @@ function renderHosts() {
       </article>`;
     })
     .join("");
+  renderDiagnostics();
+}
+
+function renderDiagnostics() {
+  const empty = $("diagEmpty");
+  const table = $("diagHostTable");
+  const body = $("diagHostBody");
+  const pill = $("diagPill");
+  if (!empty || !table || !body) return;
+
+  const snap = hostsState;
+  if (!snap) {
+    empty.hidden = false;
+    empty.textContent =
+      "Connect the carrier over USB — diagnostics refresh with hosts.";
+    table.hidden = true;
+    body.innerHTML = "";
+    if (pill) {
+      pill.textContent = "fleet path";
+      pill.className = "pill";
+    }
+  } else if (!snap.hosts.length) {
+    empty.hidden = false;
+    empty.innerHTML =
+      carrier.uptimeS != null && carrier.uptimeS < 120
+        ? "Carrier just rebooted — wait for host rejoin (see Connected hosts)."
+        : "No Zigbee hosts in registry.";
+    table.hidden = true;
+    body.innerHTML = "";
+    if (pill) {
+      pill.textContent = "0 hosts";
+      pill.className = "pill down";
+    }
+  } else {
+    empty.hidden = true;
+    table.hidden = false;
+    const online = snap.hosts.filter(isHostOnline).length;
+    if (pill) {
+      pill.textContent = `${online} online · ${snap.hosts.length} listed`;
+      pill.className = "pill " + (online > 0 ? "live" : "down");
+    }
+    body.innerHTML = snap.hosts
+      .map((h) => {
+        const onlineH = isHostOnline(h);
+        const age = hostReportAgeMs(h.last);
+        const statusLabel = onlineH
+          ? "online"
+          : age != null && age > HOST_STALE_MS
+            ? "offline"
+            : "link down";
+        const statusClass = onlineH ? "ok" : "bad";
+        return `<tr>
+          <td>${h.device_id || "—"}</td>
+          <td>${h.host_type || "—"}</td>
+          <td class="mono">${envelopeOrDash(h.node_id)}</td>
+          <td class="mono">${envelopeOrDash(h.schema_id)}</td>
+          <td><span class="host-link ${statusClass}">${statusLabel}</span></td>
+          <td>${fmtReportAge(h.last)}</td>
+          <td class="mono">${readingsSummary(h.readings)}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+
+  const zbRadio = $("diagZbRadio");
+  const zbReports = $("diagZbReports");
+  if (zbRadio) zbRadio.textContent = carrier.zigbee || "—";
+  if (zbReports) {
+    zbReports.textContent =
+      carrier.zigbeeReports != null ? String(carrier.zigbeeReports) : "—";
+  }
+
+  const gpsEl = $("diagGps");
+  const upEl = $("diagUplinkLast");
+  const sdEl = $("diagSdQueue");
+  if (gpsEl) {
+    if (!carrier.gps) {
+      gpsEl.textContent = "—";
+    } else if (!carrier.gps.ok) {
+      gpsEl.textContent = "no fix";
+    } else {
+      const age =
+        carrier.gps.age_ms != null ? ` · age ${fmtAgo(carrier.gps.age_ms)}` : "";
+      gpsEl.textContent = `ok · ${carrier.gps.lat}, ${carrier.gps.lng}${age}`;
+    }
+  }
+  if (upEl) {
+    const u = carrier.uplinkLast;
+    if (!u) {
+      upEl.textContent = "—";
+    } else {
+      const bits = [`http=${u.http}`];
+      if (u.ok === true) bits.push("ok");
+      if (u.ok === false) bits.push("fail");
+      if (u.skipped) bits.push("skipped");
+      if (u.reason) bits.push(u.reason);
+      if (u.error) bits.push(`err=${u.error}`);
+      upEl.textContent = bits.join(" · ");
+    }
+  }
+  if (sdEl) {
+    const q = carrier.sdQueue;
+    if (!q) {
+      sdEl.textContent = "—";
+    } else {
+      const bits = [
+        q.sd_mounted ? "mounted" : "not mounted",
+        `depth=${q.depth}`,
+      ];
+      if (q.bytes != null) bits.push(`bytes=${q.bytes}`);
+      if (q.drain_err) bits.push(`drain=${q.drain_err}`);
+      sdEl.textContent = bits.join(" · ");
+    }
+  }
+}
+
+function buildFleetSnapshot() {
+  return {
+    captured_at: new Date().toISOString(),
+    hosts: hostsState
+      ? {
+          host_count: hostsState.host_count,
+          joined: hostsState.joined,
+          hosts: hostsState.hosts,
+        }
+      : null,
+    carrier_zigbee: {
+      radio: carrier.zigbee || null,
+      reports: carrier.zigbeeReports != null ? carrier.zigbeeReports : null,
+      uptime_s: carrier.uptimeS != null ? carrier.uptimeS : null,
+    },
+    carrier_path: {
+      gps: carrier.gps,
+      uplink_last: carrier.uplinkLast,
+      queue: carrier.sdQueue,
+    },
+  };
+}
+
+async function copyFleetSnapshot() {
+  const status = $("diagCopyStatus");
+  const payload = JSON.stringify(buildFleetSnapshot(), null, 2);
+  try {
+    await navigator.clipboard.writeText(payload);
+    if (status) status.textContent = "Copied to clipboard";
+  } catch (e) {
+    if (status) {
+      status.textContent = "Copy failed — select serial log or allow clipboard";
+    }
+    console.warn(e);
+  }
+  if (status) {
+    setTimeout(() => {
+      if (
+        status.textContent.startsWith("Copied") ||
+        status.textContent.startsWith("Copy failed")
+      ) {
+        status.textContent = "";
+      }
+    }, 2500);
+  }
 }
 
 function applyDashboard(data) {
@@ -216,6 +407,12 @@ function applyDashboard(data) {
   if (c.can_meta) {
     $("canMeta").textContent =
       `protocol ${c.can_meta.protocol} · poller ${c.can_meta.poller} · profile ${c.can_meta.profile}`;
+    const pname = c.can_meta.profile;
+    if (pname && pname !== "(none)") {
+      ensureProfileOption(pname);
+      $("profileSel").value = pname;
+      $("profileList").textContent = "Active: " + pname;
+    }
   }
   renderCarrierKv();
   if (hostsState) renderHosts();
@@ -230,6 +427,9 @@ function onCarrierReboot() {
   hostsState = null;
   carrier.zigbee = null;
   carrier.zigbeeReports = null;
+  carrier.gps = null;
+  carrier.uplinkLast = null;
+  carrier.sdQueue = null;
   renderHosts();
   renderCarrierKv();
   if (connected) {
@@ -285,6 +485,11 @@ function parseRxLogOnly(raw) {
   const st = line.match(/^can_ready=\w+ protocol=(\S+) poller=(\w+) profile=(\S+)/);
   if (st) {
     $("canMeta").textContent = `protocol ${st[1]} · poller ${st[2]} · profile ${st[3]}`;
+    if (st[3] && st[3] !== "(none)") {
+      ensureProfileOption(st[3]);
+      $("profileSel").value = st[3];
+      $("profileList").textContent = "Active: " + st[3];
+    }
   }
 
   const metrics = line.match(/^metrics=(\{.*\})$/);
@@ -315,11 +520,109 @@ function parseRxLogOnly(raw) {
     renderCarrierKv();
   }
 
+  const otaFw = line.match(/^ota:\s*fw=(\S+)/);
+  if (otaFw) {
+    carrier.fw = otaFw[1];
+    renderCarrierKv();
+  }
+
+  const uplinkHdr = line.match(
+    /^uplink:\s*enabled=(\w+)\s+interval=(\d+)s?\s+device_id=(\S+)\s+node_id=(\S+)/
+  );
+  if (uplinkHdr) {
+    $("uplinkEn").checked = uplinkHdr[1] === "yes";
+    $("uplinkIv").value = uplinkHdr[2];
+    if (uplinkHdr[3] && uplinkHdr[3] !== "(none)") {
+      $("uplinkDid").value = uplinkHdr[3];
+      carrier.deviceId = uplinkHdr[3];
+    }
+    if (uplinkHdr[4]) $("uplinkNid").value = uplinkHdr[4];
+    carrier.uplink =
+      uplinkHdr[1] === "yes"
+        ? `on · every ${uplinkHdr[2]}s`
+        : "off";
+    renderCarrierKv();
+  }
+
+  const uplinkUrlLine = line.match(/^\s*url=(\S+)\s+schemaId=(\S+)/);
+  if (uplinkUrlLine) {
+    if (uplinkUrlLine[1]) $("uplinkUrl").value = uplinkUrlLine[1];
+    if (uplinkUrlLine[2]) $("uplinkSchema").value = uplinkUrlLine[2];
+  }
+
   const uplinkFail = line.match(/uplink:.*POST fail/);
   const uplinkOk = line.match(/uplink: enqueued/);
   if (uplinkFail) carrier.uplink = "POST failing (see log)";
   if (uplinkOk) carrier.uplink = "queueing batches";
   if (uplinkFail || uplinkOk) renderCarrierKv();
+
+  let pathDirty = false;
+  const lastM = line.match(
+    /(?:^|\s)last:\s*ok=(\w+)\s+skipped=(\w+)\s+http=(-?\d+)\s+reason="([^"]*)"\s+error="([^"]*)"/
+  );
+  if (lastM) {
+    carrier.uplinkLast = {
+      ok: lastM[1] === "yes",
+      skipped: lastM[2] === "yes",
+      http: Number(lastM[3]),
+      reason: lastM[4] || "",
+      error: lastM[5] || "",
+    };
+    pathDirty = true;
+  }
+  const nowM = line.match(
+    /uplink now:\s*\S+\s+http=(-?\d+)\s+reason="([^"]*)"\s+error="([^"]*)"/
+  );
+  if (nowM) {
+    carrier.uplinkLast = {
+      ok: Number(nowM[1]) >= 200 && Number(nowM[1]) < 300,
+      skipped: false,
+      http: Number(nowM[1]),
+      reason: nowM[2] || "",
+      error: nowM[3] || "",
+    };
+    pathDirty = true;
+  }
+  const qM = line.match(
+    /(?:^|\s)queue:\s*sd=(\w+)\s+depth=(\d+)\s+bytes=(\d+)\s+drain_err="([^"]*)"/
+  );
+  if (qM) {
+    carrier.sdQueue = {
+      sd_mounted: qM[1] === "yes",
+      depth: Number(qM[2]),
+      bytes: Number(qM[3]),
+      drain_err: qM[4] || "",
+    };
+    pathDirty = true;
+  }
+  const qtestM = line.match(
+    /uplink qtest:.*\bsd=(\w+)\s+depth=(\d+)/
+  );
+  if (qtestM) {
+    carrier.sdQueue = {
+      sd_mounted: qtestM[1] === "yes",
+      depth: Number(qtestM[2]),
+      bytes: carrier.sdQueue?.bytes ?? null,
+      drain_err: carrier.sdQueue?.drain_err || "",
+    };
+    pathDirty = true;
+  }
+  const gpsOk = line.match(
+    /(?:^|\s)gps:\s*ok\s+lat=(-?[\d.]+)\s+lng=(-?[\d.]+)\s+age_ms=(\d+)/
+  );
+  if (gpsOk) {
+    carrier.gps = {
+      ok: true,
+      lat: gpsOk[1],
+      lng: gpsOk[2],
+      age_ms: Number(gpsOk[3]),
+    };
+    pathDirty = true;
+  } else if (/(?:^|\s)gps:\s*no fix/.test(line)) {
+    carrier.gps = { ok: false, lat: null, lng: null, age_ms: null };
+    pathDirty = true;
+  }
+  if (pathDirty) renderDiagnostics();
 
   const zbTlv = line.match(/TLV\s+\d+\s+B\s+from\s+0x([0-9a-f]+)/i);
   if (zbTlv) {
@@ -464,6 +767,9 @@ async function watchConnection() {
     syncConnectUi();
     stopHostsTimer();
     hostsState = null;
+    carrier.gps = null;
+    carrier.uplinkLast = null;
+    carrier.sdQueue = null;
     renderHosts();
     // Do NOT auto-reopen USB — that puts ESP32-C6 into ROM download mode after
     // host/carrier power cycles and mixes old log buffers across devices.
@@ -512,6 +818,8 @@ async function refreshConn() {
       lastUptimeS = null;
       setTimeout(() => refreshDashboard().catch(() => {}), 1200);
       setTimeout(() => fetchDashboard().catch(() => {}), 400);
+      /* profiles list fills Active profile dropdown (PID set in NVS). */
+      setTimeout(() => sendCmd("profiles").catch(() => {}), 1800);
     }
     startHostsTimer();
   } else {
@@ -634,6 +942,14 @@ $("fleetHosts").onclick = () =>
     .then(fetchDashboard)
     .catch((e) => alert(e.message));
 $("fleetHostsRefresh").onclick = () => refreshDashboard().catch((e) => alert(e.message));
+const diagRefreshBtn = $("diagRefreshBtn");
+if (diagRefreshBtn) {
+  diagRefreshBtn.onclick = () => refreshDashboard().catch((e) => alert(e.message));
+}
+const diagCopyBtn = $("diagCopyBtn");
+if (diagCopyBtn) {
+  diagCopyBtn.onclick = () => copyFleetSnapshot().catch((e) => alert(e.message));
+}
 
 $("provisionBtn").onclick = async () => {
   const did = $("uplinkDid").value.trim();

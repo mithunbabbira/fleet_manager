@@ -10,9 +10,14 @@ extern "C" {
 
 #define FLEET_TLV_MAGIC 0x46u
 #define FLEET_TLV_VERSION 1u
-#define FLEET_TLV_MAX_FRAME 128u
+/** Zigbee custom-cluster path allows ~240 B; HELLO metric map needs headroom. */
+#define FLEET_TLV_MAX_FRAME 240u
 #define FLEET_TLV_MAX_READINGS 16u
 #define FLEET_DEVICE_ID_MAX 32u
+#define FLEET_NODE_ID_MAX 40u
+#define FLEET_SCHEMA_ID_MAX 16u
+#define FLEET_HOST_TYPE_NAME_MAX 32u
+#define FLEET_METRIC_MAP_MAX 160u
 
 typedef enum {
     FLEET_MSG_HELLO = 1,
@@ -29,6 +34,11 @@ typedef enum {
     FLEET_TLV_STATUS = 5,
     FLEET_TLV_MANIFEST_VER = 6,
     FLEET_TLV_TS_MS_HI = 7,
+    FLEET_TLV_NODE_ID = 8,
+    FLEET_TLV_SCHEMA_ID = 9,
+    FLEET_TLV_HOST_TYPE = 10,
+    /** Body (HELLO): `tlv_id:key:unit:type;...` — see fleet_tlv docs. */
+    FLEET_TLV_METRIC_MAP = 11,
 } fleet_header_tlv_id_t;
 
 typedef enum {
@@ -46,6 +56,9 @@ typedef enum {
 
 typedef struct {
     char device_id[FLEET_DEVICE_ID_MAX];
+    char node_id[FLEET_NODE_ID_MAX];
+    char schema_id[FLEET_SCHEMA_ID_MAX];
+    char host_type[FLEET_HOST_TYPE_NAME_MAX];
     uint16_t host_type_id;
     uint8_t seq;
     uint64_t ts_ms;
@@ -62,7 +75,7 @@ typedef struct {
         uint8_t u8;
         uint16_t u16;
         int32_t i32;
-        char str[24];
+        char str[FLEET_METRIC_MAP_MAX];
     } value;
 } fleet_tlv_value_t;
 
@@ -87,6 +100,9 @@ int fleet_tlv_encode(const fleet_encode_input_t *in, uint8_t *out, size_t out_le
 int fleet_tlv_decode(const uint8_t *in, size_t in_len, fleet_decoded_frame_t *out);
 
 bool fleet_tlv_header_valid(const fleet_frame_header_t *hdr);
+
+/** True when header carries cloud envelope fields from the host. */
+bool fleet_tlv_header_has_envelope(const fleet_frame_header_t *hdr);
 
 #ifdef __cplusplus
 }

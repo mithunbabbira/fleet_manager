@@ -141,7 +141,8 @@ status, profile, telemetry, LTE, uplink, VIN, DTC, and OBD APIs — see
 ## LTE uplink
 
 `telemetry_uplink` emits **multiple typed events** per tick (OBD `1087`, GPS `1089`,
-host snapshot `1088`) with envelope `{device_id, node_id, schemaId, ts_ms, payload}`.
+host events with **host-owned** `schemaId` such as UL212 `1088`) with envelope
+`{device_id, node_id, schemaId, ts_ms, payload}`.
 Live POST: one JSON object when count==1, JSON array when count>1. Batch/SD drain
 is always an array. `ts_ms` is **UTC epoch ms** from modem wall-clock when available
 (`AT+CCLK?` network time, else GPS UTC from `QGPSLOC`); falls back to uptime ms until
@@ -155,12 +156,15 @@ schemas `1088` and `1089` for host and GPS events.
 ## Fleet Zigbee
 
 Optional second ESP32-C6 hosts join an **open** Zigbee network on channel 15 and
-send `fleet_tlv` frames on custom cluster `0xFC00`. Coordinator ingest updates
-`host_registry`; each Zigbee host with valid readings becomes **one** schema-`1088`
-uplink event with metrics bundled as flat keys on `payload` (not one event per
-reading, and not a nested `hosts[]` array).
+send `fleet_tlv` frames on custom cluster `0xFC00`. HELLO/REPORT carry
+`device_id` / `node_id` / `schemaId` plus a HELLO metric map; coordinator
+`host_registry` accepts known manifests **or** dynamic envelope hosts. Each host
+with valid readings becomes **one** uplink event (`schemaId` from the host) with
+metrics as flat keys on `payload` (not one event per reading, and not a nested
+`hosts[]` array).
 
-Docs: `docs/fleet-zigbee-host-guide.md`, `docs/fleet-zigbee-coexistence.md`.
+Docs: `docs/fleet-zigbee-host-guide.md`,
+`docs/superpowers/specs/2026-09-03-host-owned-zigbee-envelope-design.md`.
 
 ## Known follow-up work
 

@@ -7,6 +7,8 @@
 #include "esp_timer.h"
 #endif
 
+#include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 static fleet_registry_snapshot_t s_registry;
@@ -55,6 +57,25 @@ const fleet_manifest_entry_t *host_registry_find_manifest(uint16_t host_type_id)
     return fleet_manifest_find(host_type_id);
 }
 
+static void seed_readings_from_manifest(fleet_registry_host_t *h,
+                                        const fleet_manifest_entry_t *manifest)
+{
+    if (!manifest) {
+        return;
+    }
+    strncpy(h->host_type, manifest->host_type, sizeof(h->host_type) - 1);
+    h->reading_count = manifest->reading_count;
+    for (uint8_t r = 0; r < manifest->reading_count; r++) {
+        strncpy(h->readings[r].key, manifest->readings[r].key, sizeof(h->readings[r].key) - 1);
+        strncpy(h->readings[r].unit, manifest->readings[r].unit,
+                sizeof(h->readings[r].unit) - 1);
+        h->readings[r].tlv_id = manifest->readings[r].tlv_id;
+        h->readings[r].valid = false;
+        h->readings[r].value = 0.0;
+        h->readings[r].ts_ms = 0;
+    }
+}
+
 static fleet_registry_host_t *find_or_alloc_host(const char *device_id, uint16_t host_type_id,
                                                  const fleet_manifest_entry_t *manifest)
 {
@@ -79,33 +100,136 @@ static fleet_registry_host_t *find_or_alloc_host(const char *device_id, uint16_t
     memset(h, 0, sizeof(*h));
     strncpy(h->device_id, device_id, sizeof(h->device_id) - 1);
     h->host_type_id = host_type_id;
-    if (manifest) {
-        strncpy(h->host_type, manifest->host_type, sizeof(h->host_type) - 1);
-        h->reading_count = manifest->reading_count;
-        for (uint8_t r = 0; r < manifest->reading_count; r++) {
-            strncpy(h->readings[r].key, manifest->readings[r].key,
-                    sizeof(h->readings[r].key) - 1);
-            strncpy(h->readings[r].unit, manifest->readings[r].unit,
-                    sizeof(h->readings[r].unit) - 1);
+    seed_readings_from_manifest(h, manifest);
+    return h;
+}
+
+static fleet_manifest_value_type_t parse_type_token(const char *tok)
+{
+    if (!tok || !tok[0]) {
+        return FLEET_MANIFEST_FLOAT;
+    }
+    if (strcmp(tok, "f") == 0 || strcmp(tok, "float") == 0) {
+        return FLEET_MANIFEST_FLOAT;
+    }
+    if (strcmp(tok, "u8") == 0 || strcmp(tok, "uint8") == 0) {
+        return FLEET_MANIFEST_UINT8;
+    }
+    if (strcmp(tok, "u16") == 0 || strcmp(tok, "uint16") == 0) {
+        return FLEET_MANIFEST_UINT16;
+    }
+    if (strcmp(tok, "i32") == 0 || strcmp(tok, "int32") == 0) {
+        return FLEET_MANIFEST_INT32;
+    }
+    if (strcmp(tok, "s") == 0 || strcmp(tok, "string") == 0) {
+        return FLEET_MANIFEST_STRING;
+    }
+    return FLEET_MANIFEST_FLOAT;
+}
+
+/**
+ * Parse HELLO metric map: `tlv_id:key:unit:type;...`
+ * Type letters: f, u8, u16, i32, s. Unit may be empty.
+ */
+static void apply_metric_map(fleet_registry_host_t *host, const char *map)
+{
+    if (!host || !map || !map[0]) {
+        return;
+    }
+
+    char buf[FLEET_METRIC_MAP_MAX];
+    strncpy(buf, map, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    uint8_t count = 0;
+    char *save = NULL;
+    for (char *entry = strtok_r(buf, ";", &save); entry != NULL;
+         entry = strtok_r(NULL, ";", &save)) {
+        if (count >= FLEET_REGISTRY_MAX_READINGS) {
+            break;
+        }
+        char *p = entry;
+        while (*p && isspace((unsigned char)*p)) {
+            p++;
+        }
+        if (!*p) {
+            continue;
+        }
+
+        char *c1 = strchr(p, ':');
+        if (!c1) {
+            continue;
+        }
+        *c1 = '\0';
+        char *c2 = strchr(c1 + 1, ':');
+        if (!c2) {
+            continue;
+        }
+        *c2 = '\0';
+        char *c3 = strchr(c2 + 1, ':');
+        if (!c3) {
+            continue;
+        }
+        *c3 = '\0';
+
+        long tlv = strtol(p, NULL, 10);
+        if (tlv <= 0 || tlv > 255 || tlv == FLEET_TLV_METRIC_MAP) {
+            continue;
+        }
+        const char *key = c1 + 1;
+        const char *unit = c2 + 1;
+        const char *type_tok = c3 + 1;
+        if (!key[0]) {
+            continue;
+        }
+        (void)parse_type_token(type_tok);
+
+        fleet_registry_reading_t *slot = &host->readings[count++];
+        memset(slot, 0, sizeof(*slot));
+        slot->tlv_id = (uint16_t)tlv;
+        strncpy(slot->key, key, sizeof(slot->key) - 1);
+        strncpy(slot->unit, unit, sizeof(slot->unit) - 1);
+    }
+
+    if (count > 0) {
+        host->reading_count = count;
+        for (uint8_t i = count; i < FLEET_REGISTRY_MAX_READINGS; i++) {
+            memset(&host->readings[i], 0, sizeof(host->readings[i]));
         }
     }
-    return h;
 }
 
 static void apply_reading(fleet_registry_host_t *host, const fleet_manifest_entry_t *manifest,
                           const fleet_tlv_value_t *tlv, uint64_t ts_ms)
 {
-    for (uint8_t i = 0; i < host->reading_count; i++) {
-        const fleet_manifest_reading_t *def = &manifest->readings[i];
-        if (def->tlv_id != tlv->tlv_id) {
-            continue;
+    if (tlv->tlv_id == FLEET_TLV_METRIC_MAP) {
+        if (tlv->type == FLEET_VAL_STRING && tlv->valid) {
+            apply_metric_map(host, tlv->value.str);
         }
-        if (def->type != tlv_to_manifest_type(tlv->type)) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < host->reading_count; i++) {
+        if (host->readings[i].tlv_id != 0) {
+            if (host->readings[i].tlv_id != tlv->tlv_id) {
+                continue;
+            }
+        } else if (manifest && i < manifest->reading_count) {
+            if (manifest->readings[i].tlv_id != tlv->tlv_id) {
+                continue;
+            }
+            if (manifest->readings[i].type != tlv_to_manifest_type(tlv->type)) {
+                continue;
+            }
+        } else {
             continue;
         }
         host->readings[i].value = tlv_to_double(tlv);
         host->readings[i].valid = tlv->valid;
         host->readings[i].ts_ms = ts_ms;
+        if (host->readings[i].tlv_id == 0) {
+            host->readings[i].tlv_id = tlv->tlv_id;
+        }
         return;
     }
 }
@@ -127,9 +251,10 @@ int host_registry_ingest_frame_ex(const uint8_t *frame, size_t frame_len, uint64
         return -2;
     }
 
+    const bool has_envelope = fleet_tlv_header_has_envelope(&decoded.header);
     const fleet_manifest_entry_t *manifest =
         fleet_manifest_find(decoded.header.host_type_id);
-    if (!manifest) {
+    if (!manifest && !has_envelope) {
         return -3;
     }
 
@@ -143,20 +268,45 @@ int host_registry_ingest_frame_ex(const uint8_t *frame, size_t frame_len, uint64
         return -5;
     }
 
+    if (decoded.header.host_type_id != 0) {
+        host->host_type_id = decoded.header.host_type_id;
+    }
+    if (decoded.header.host_type[0]) {
+        strncpy(host->host_type, decoded.header.host_type, sizeof(host->host_type) - 1);
+    } else if (manifest && !host->host_type[0]) {
+        strncpy(host->host_type, manifest->host_type, sizeof(host->host_type) - 1);
+    }
+    if (decoded.header.node_id[0]) {
+        strncpy(host->node_id, decoded.header.node_id, sizeof(host->node_id) - 1);
+    }
+    if (decoded.header.schema_id[0]) {
+        strncpy(host->schema_id, decoded.header.schema_id, sizeof(host->schema_id) - 1);
+    }
+
     host->short_addr = short_addr;
     host->link_ok = true;
     host->last_seen_ms = now_ms ? now_ms : decoded.header.ts_ms;
 
+    /* Metric maps first so REPORT values in the same frame can bind. */
     for (uint8_t i = 0; i < decoded.reading_count; i++) {
-        apply_reading(host, manifest, &decoded.readings[i], decoded.header.ts_ms);
+        if (decoded.readings[i].tlv_id == FLEET_TLV_METRIC_MAP) {
+            apply_reading(host, manifest, &decoded.readings[i], decoded.header.ts_ms);
+        }
+    }
+    for (uint8_t i = 0; i < decoded.reading_count; i++) {
+        if (decoded.readings[i].tlv_id != FLEET_TLV_METRIC_MAP) {
+            apply_reading(host, manifest, &decoded.readings[i], decoded.header.ts_ms);
+        }
     }
 
-    for (uint8_t i = 0; i < manifest->reading_count; i++) {
-        if (!manifest->readings[i].required) {
-            continue;
-        }
-        if (decoded.msg_type == FLEET_MSG_REPORT && !host->readings[i].valid) {
-            return -6;
+    if (manifest) {
+        for (uint8_t i = 0; i < manifest->reading_count; i++) {
+            if (!manifest->readings[i].required) {
+                continue;
+            }
+            if (decoded.msg_type == FLEET_MSG_REPORT && !host->readings[i].valid) {
+                return -6;
+            }
         }
     }
 
@@ -212,6 +362,8 @@ int host_registry_to_telemetry(const fleet_registry_host_t *host, void *telemetr
     telemetry_host_report_t *rep = (telemetry_host_report_t *)telemetry_out;
     memset(rep, 0, sizeof(*rep));
     strncpy(rep->device_id, host->device_id, sizeof(rep->device_id) - 1);
+    strncpy(rep->node_id, host->node_id, sizeof(rep->node_id) - 1);
+    strncpy(rep->schema_id, host->schema_id, sizeof(rep->schema_id) - 1);
     strncpy(rep->host_type, host->host_type, sizeof(rep->host_type) - 1);
     rep->host_type_id = host->host_type_id;
     rep->ts_ms = host->last_seen_ms;

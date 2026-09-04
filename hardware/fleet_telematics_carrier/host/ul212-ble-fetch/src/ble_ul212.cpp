@@ -37,6 +37,8 @@ static uint32_t rxLastMs = 0;
 static uint32_t lastRxMs = 0;
 static uint32_t lastConnectMs = 0;
 static volatile bool pollPaused = false;
+/** When set, bleUl212Task skips connect attempts (CLI scan / radio quiet). */
+static volatile bool connectHold = false;
 
 static Ul212Reading latest;
 static BleStats stats;
@@ -209,6 +211,52 @@ static void releaseClient() {
   linkUp = false;
 }
 
+static void normalizeMac(const char *in, char *out, size_t out_len) {
+  size_t j = 0;
+  for (size_t i = 0; in[i] && j + 1 < out_len; i++) {
+    char c = in[i];
+    if (c == ':' || c == '-' || c == ' ') continue;
+    if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
+    out[j++] = c;
+  }
+  out[j] = '\0';
+}
+
+static bool macEqual(const char *a, const char *b) {
+  char na[24], nb[24];
+  normalizeMac(a, na, sizeof(na));
+  normalizeMac(b, nb, sizeof(nb));
+  return na[0] && strcmp(na, nb) == 0;
+}
+
+/**
+ * Vendor UNI app always discovers then createBLEConnection(deviceId).
+ * Direct connect-by-MAC without a fresh advertisement often times out on
+ * ESP32 NimBLE even when the phone can connect at the same range.
+ */
+static bool scanLocateTarget(const char *mac, BLEAddress *out_addr, int *out_rssi) {
+  if (!mac || !out_addr) return false;
+
+  BLEScan *scan = BLEDevice::getScan();
+  scan->setActiveScan(true);
+  scan->setInterval(80);
+  scan->setWindow(48);
+  /* 5 s locate window — UNI app keeps discovery on until the user picks a device. */
+  BLEScanResults *found = scan->start(5, false);
+  bool hit = false;
+  for (int i = 0; found && i < found->getCount(); i++) {
+    BLEAdvertisedDevice d = found->getDevice(i);
+    if (!macEqual(d.getAddress().toString().c_str(), mac)) continue;
+    *out_addr = d.getAddress();
+    if (out_rssi) *out_rssi = d.getRSSI();
+    hit = true;
+    break;
+  }
+  scan->clearResults();
+  scan->stop();
+  return hit;
+}
+
 static bool pickEndpoint(BLERemoteService *svc) {
   BLERemoteCharacteristic *ffe1 = svc->getCharacteristic(charFfe1);
   BLERemoteCharacteristic *ffe2 = svc->getCharacteristic(charFfe2);
@@ -245,36 +293,86 @@ static bool pickEndpoint(BLERemoteService *svc) {
 
 static bool connectAndUnlock(const char *mac) {
   releaseClient();
+  delay(200);
+
+  /* Match UNI Ee(): stop prior activity, locate device, then connect ~12s. */
+  BLEAddress addr(mac);
+  int rssi = 0;
+  const bool seen = scanLocateTarget(mac, &addr, &rssi);
+  if (seen) {
+    stats.lastSensorRssi = rssi;
+    Serial.printf("[ble] advertised %s rssi=%d dBm — connecting\n", mac, rssi);
+  } else {
+    stats.notAdvertising++;
+    Serial.printf("[ble] %s not seen in scan — direct connect try\n", mac);
+  }
 
   pClient = BLEDevice::createClient();
   pClient->setClientCallbacks(&clientCb);
 
   stats.connectAttempts++;
   Serial.printf("[ble] connecting to %s ...\n", mac);
-  if (!pClient->connect(BLEAddress(mac))) {
-    stats.connectFailures++;
-    logEvent("connect failed (#%lu)", (unsigned long)stats.connectFailures);
-    releaseClient();
-    return false;
+  if (!pClient->connect(addr)) {
+    /* Address-type mismatch fallback (scan miss path). */
+    if (!seen) {
+      BLEAddress rand_addr(String(mac), BLE_ADDR_RANDOM);
+      Serial.println("[ble] retry connect as RANDOM addr");
+      if (!pClient->connect(rand_addr)) {
+        stats.connectFailures++;
+        logEvent("connect failed (#%lu)", (unsigned long)stats.connectFailures);
+        releaseClient();
+        return false;
+      }
+    } else {
+      stats.connectFailures++;
+      logEvent("connect failed (#%lu)", (unsigned long)stats.connectFailures);
+      releaseClient();
+      return false;
+    }
   }
 
   delay(500);
+  /* UNI Ee(): setBLEMTU(512) after connect, before GATT walk. */
+  (void)pClient->setMTU(512);
+  delay(300);
 
-  BLERemoteService *svc = pClient->getService(serviceUUID);
+  /* UNI ge(): retry getServices a few times before giving up. */
+  BLERemoteService *svc = nullptr;
+  for (int attempt = 0; attempt < 5 && pClient->isConnected(); attempt++) {
+    if (attempt) delay(400);
+    svc = pClient->getService(serviceUUID);
+    if (svc) break;
+    Serial.printf("[ble] getService FFE0 retry %d\n", attempt + 1);
+  }
   if (!svc || !pickEndpoint(svc)) {
+    Serial.println("[ble] FFE0/chars missing after connect");
     releaseClient();
     return false;
   }
 
   delay(200);
 
+  /*
+   * UNI: if notify+write share one char and it is write-with-response,
+   * unlock before enabling notify. Our UL212 often reports same=FFE1; doing
+   * notify first has been dropping the link (writeValue Disconnected).
+   */
   const bool sameChar = (pWriteChar == pNotifyChar);
   const bool unlockBeforeNotify =
-      sameChar && pWriteChar->canWrite() && !pWriteChar->canWriteNoResponse();
+      sameChar && (pWriteChar->canWrite() || !pWriteChar->canWriteNoResponse());
+
+  Serial.printf("[ble] handshake unlock_first=%s same=%s w=%d wnr=%d\n",
+                unlockBeforeNotify ? "yes" : "no", sameChar ? "yes" : "no",
+                (int)pWriteChar->canWrite(), (int)pWriteChar->canWriteNoResponse());
 
   if (unlockBeforeNotify) {
     sendCmd(CMD_UNLOCK, sizeof(CMD_UNLOCK));
-    delay(400);
+    delay(500);
+    if (!pClient->isConnected()) {
+      Serial.println("[ble] dropped after unlock");
+      releaseClient();
+      return false;
+    }
     if (!enableNotify(pNotifyChar)) {
       releaseClient();
       return false;
@@ -285,10 +383,20 @@ static bool connectAndUnlock(const char *mac) {
       return false;
     }
     delay(400);
+    if (!pClient->isConnected()) {
+      Serial.println("[ble] dropped after notify");
+      releaseClient();
+      return false;
+    }
     sendCmd(CMD_UNLOCK, sizeof(CMD_UNLOCK));
   }
 
   delay(300);
+  if (!pClient->isConnected()) {
+    Serial.println("[ble] dropped before first poll");
+    releaseClient();
+    return false;
+  }
   rxLen = 0;
   lastRxMs = millis();
   lastConnectMs = lastRxMs;
@@ -370,8 +478,9 @@ size_t bleUl212CopyEvents(BleEvent *out, size_t maxEvents) {
 }
 
 size_t bleUl212Scan(BleScanEntry *out, size_t maxEntries) {
+  connectHold = true;
   releaseClient();
-  delay(200);
+  delay(400);
 
   BLEScan *scan = BLEDevice::getScan();
   scan->setActiveScan(true);
@@ -389,6 +498,8 @@ size_t bleUl212Scan(BleScanEntry *out, size_t maxEntries) {
     strncpy(e.name, d.getName().c_str(), sizeof(e.name) - 1);
   }
   scan->clearResults();
+  scan->stop();
+  connectHold = false;
   return n;
 }
 
@@ -409,6 +520,11 @@ void bleUl212Task(void *) {
     if (!bleUl212Configured()) {
       Serial.println("[ble] no sensor MAC configured — run scan / mac / save on serial");
       vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    if (connectHold) {
+      vTaskDelay(pdMS_TO_TICKS(200));
       continue;
     }
 

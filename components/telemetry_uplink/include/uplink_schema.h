@@ -1,10 +1,10 @@
 #pragma once
 
 /*
- * Schema ID registry for Trafyn nc-events-api.
+ * Schema ID helpers for Trafyn nc-events-api.
  *
- * To change schema numbers: edit uplink_schema_ids.h and rebuild.
- * Host type → schema mapping: uplink_schema.c
+ * Carrier-owned IDs: uplink_schema_ids.h (OBD / GPS).
+ * Host-owned IDs: Zigbee TLV SCHEMA_ID on each REPORT/HELLO.
  */
 
 #include "uplink_schema_ids.h"
@@ -15,7 +15,10 @@
 extern "C" {
 #endif
 
-/** @brief Schema id for a Zigbee host type; NULL if unknown. */
+/**
+ * @brief Legacy host_type → schema lookup (always NULL).
+ * Host events use uplink_host_report_t.schema_id from the wire.
+ */
 const char *uplink_schema_for_host(uint16_t host_type_id);
 
 #ifdef __cplusplus

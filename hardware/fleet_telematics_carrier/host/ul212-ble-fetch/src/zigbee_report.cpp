@@ -23,14 +23,30 @@ void zigbeeReportTask(void *param)
 {
     (void)param;
 
-    /* BLE-first: wait for a valid UL212 frame (or 45s) before starting Zigbee radio
-     * so coexistence does not fight the initial sensor link. */
-    const uint32_t zb_wait_deadline = millis() + 45000;
-    while (millis() < zb_wait_deadline) {
-        if (bleUl212Latest().valid) break;
+    /* BLE-first: do not start Zigbee until the fuel sensor is linked and we
+     * have a valid reading. HELLO without payload wastes RF and fights BLE. */
+    uint32_t last_wait_log_ms = 0;
+    for (;;) {
+        const bool configured = bleUl212Configured();
+        const bool connected = bleUl212Connected();
+        const bool have_reading = bleUl212Latest().valid;
+        if (configured && connected && have_reading) {
+            break;
+        }
+        const uint32_t now = millis();
+        if (last_wait_log_ms == 0 || (now - last_wait_log_ms) >= 10000) {
+            last_wait_log_ms = now;
+            if (!configured) {
+                Serial.println("[zb] waiting for sensor MAC (scan / mac / save)");
+            } else if (!connected) {
+                Serial.println("[zb] waiting for BLE sensor connection…");
+            } else {
+                Serial.println("[zb] BLE up — waiting for first valid reading…");
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
-    Serial.println("[zb] starting Zigbee stack (BLE wait done)");
+    Serial.println("[zb] BLE sensor ready — starting Zigbee stack");
     zigbeeReportBegin();
 
     uint32_t last_report_ms = 0;

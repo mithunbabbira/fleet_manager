@@ -774,8 +774,9 @@ static void cmd_fleet(char *args)
                (unsigned long)snap.joined_count);
         for (uint8_t i = 0; i < snap.host_count; i++) {
             const fleet_registry_host_t *h = &snap.hosts[i];
-            printf("  %s type=%s id=%u link=%d last=%llu\n", h->device_id, h->host_type,
-                   (unsigned)h->host_type_id, (int)h->link_ok,
+            printf("  %s type=%s id=%u node=%s schema=%s link=%d last=%llu\n", h->device_id,
+                   h->host_type, (unsigned)h->host_type_id, h->node_id[0] ? h->node_id : "-",
+                   h->schema_id[0] ? h->schema_id : "-", (int)h->link_ok,
                    (unsigned long long)h->last_seen_ms);
             for (uint8_t r = 0; r < h->reading_count; r++) {
                 if (!h->readings[r].valid) {
@@ -789,7 +790,7 @@ static void cmd_fleet(char *args)
     }
     if (strncmp(args, "ingest ", 7) == 0) {
         args += 7;
-        uint8_t frame[128];
+        uint8_t frame[FLEET_TLV_MAX_FRAME];
         size_t n = 0;
         while (*args && n < sizeof(frame)) {
             while (*args == ' ') {

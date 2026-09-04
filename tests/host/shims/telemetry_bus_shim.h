@@ -24,7 +24,9 @@ typedef struct {
 
 typedef struct {
     char device_id[32];
-    char host_type[24];
+    char node_id[40];
+    char schema_id[16];
+    char host_type[32];
     uint16_t host_type_id;
     uint8_t reading_count;
     telemetry_host_reading_t readings[FLEET_MAX_READINGS_PER_REPORT];

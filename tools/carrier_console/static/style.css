@@ -101,3 +101,38 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .tx { color: var(--warn); }
 .rx { color: #ccc; }
 .sys { color: var(--muted); }
+.diag-sub {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  margin: 16px 0 8px;
+}
+.diag-table-wrap { overflow-x: auto; }
+.diag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.diag-table th,
+.diag-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.diag-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.diag-table .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.diag-kv { margin-top: 4px; }
+.host-envelope {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

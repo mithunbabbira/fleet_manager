@@ -59,6 +59,8 @@ typedef struct {
 
 typedef struct {
     char device_id[32];
+    char node_id[40];
+    char schema_id[16];
     char host_type[32];
     uint16_t host_type_id;
     uint8_t reading_count;
@@ -133,7 +135,7 @@ void uplink_virtual_gps_ids(const char *carrier_device_id, const char *carrier_n
                             char *gps_device_id, size_t gps_dev_len, char *gps_node_id,
                             size_t gps_node_len);
 
-/** @brief node-{host_device_id} */
+/** @brief Fallback node-{host_device_id} when host omits node_id on the wire. */
 void uplink_host_node_id(const char *host_device_id, char *node_id, size_t node_len);
 
 int uplink_payload_build_obd_payload(const uplink_snapshot_t *snap, char *out, size_t out_len);

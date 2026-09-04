@@ -1,31 +1,35 @@
 # Fleet Zigbee host guide
 
-How to add a sensor host to the fleet telematics carrier without editing coordinator C code for each sensor type.
+How to add a sensor host so the carrier needs **no schema table changes** for cloud uplink.
 
 ## Architecture
 
 ```
 Host (ESP32-C6)                    Master carrier (ESP32-C6)
   sensor → TLV encode                Zigbee coordinator (open network)
-         → Zigbee REPORT  ────────►  → host_registry
-                                       → telemetry_uplink → LTE → cloud
+         → HELLO (envelope+map) ──►  → host_registry (dynamic slots)
+         → REPORT (values)      ──►  → telemetry_uplink → LTE → cloud
 ```
 
-- **Contract:** `host.manifest.json` per host under `hardware/fleet_telematics_carrier/host/`.
-- **Shared constants:** `fleet_zigbee_cluster.h` (cluster `0xFC00`, endpoints, command id).
-- **Security (lab):** open Zigbee join on a fixed channel — no install codes.
+Host owns cloud envelope fields on every HELLO/REPORT:
+
+| Field | TLV | Notes |
+|-------|-----|--------|
+| `device_id` | 1 | Stable host identity |
+| `node_id` | 8 | Cloud `node_id` |
+| `schemaId` | 9 | Cloud `schemaId` (e.g. `1088`) |
+| `host_type` | 10 | Optional display / payload |
+| metric map | body 11 | `tlv_id:key:unit:type;…` on HELLO |
+
+Carrier still uses `host.manifest.json` as an optional catalog for lab/legacy hosts. New hosts can join with envelope + metric map only.
 
 ## Add a new host
 
 1. Copy `host/_template/` to `host/my-sensor/`.
-2. Edit `host.manifest.json` — unique `host_type`, `host_type_id`, and `readings[]` with stable `tlv_id` values.
-3. Regenerate the catalog (also runs on ESP-IDF build):
-   ```bash
-   python3 scripts/gen_fleet_manifests.py
-   ```
-4. Implement firmware glue: map sensor readings to manifest `tlv_id`s, call `fleetZigbeeEdSendReport()` ~1 Hz.
-5. Rebuild and flash the **master** so `fleet_manifest_catalog.c` includes the new host.
-6. Flash the **host** with `FLEET_ZIGBEE_ED_RADIO=1` and `board_build.zigbee_mode = ed`.
+2. Set on the host firmware (NVS / defaults): `device_id`, `node_id`, `schema_id`, `host_type`, and HELLO `metricMap`.
+3. Optionally add `host.manifest.json` and run `python3 scripts/gen_fleet_manifests.py` for carrier-side documentation / legacy key mapping.
+4. Map sensor readings to the same `tlv_id`s as the metric map; call `fleetZigbeeEdSendReport()`.
+5. Flash the **host**. Flash the **master** only if you changed shared protocol code (`fleet_tlv`) — not for a new schema id alone.
 
 ## Provision and verify
 
@@ -33,7 +37,7 @@ Host (ESP32-C6)                    Master carrier (ESP32-C6)
 
 | Command | Purpose |
 |---------|---------|
-| `fleet hosts` | Registry snapshot (`device_id`, readings, join state) |
+| `fleet hosts` | Registry snapshot (`device_id`, `node_id`, `schema_id`, readings) |
 | `fleet ingest <hex>` | Loopback test without RF |
 | `uplink` | SD queue depth, last produce/drain status |
 
@@ -44,7 +48,9 @@ Host (ESP32-C6)                    Master carrier (ESP32-C6)
 | `help` | Serial command list |
 | `scan` | Find UL212 BLE MAC |
 | `mac AA:BB:…` | Set sensor MAC |
-| `id ul212-001` | Set Zigbee device_id |
+| `id ul212-001` | Set Zigbee `device_id` (refreshes default `node_id`) |
+| `node node-…` | Set cloud `node_id` |
+| `schema 1088` | Set cloud `schemaId` |
 | `save` | Persist NVS and reboot |
 | `status` | BLE reading + Zigbee join |
 
@@ -78,7 +84,9 @@ When the coordinator flag is off, use `fleet ingest` on the master for bench tes
 | Manifest | `host/ul212-ble-fetch/host.manifest.json` |
 | Report task | `host/ul212-ble-fetch/src/zigbee_report.cpp` |
 | Zigbee ED | `host/lib/FleetZigbee/src/fleet_zigbee_ed.cpp` |
-| Protocol | `host/lib/FleetProtocol` |
+| Protocol | `host/lib/FleetProtocol` (keep in sync with `components/fleet_protocol`) |
+
+Defaults: `device_id=ul212-001`, `node_id=node-ul212-001`, `schema_id=1088`.
 
 ## Unit tests
 
@@ -86,11 +94,10 @@ When the coordinator flag is off, use `fleet ingest` on the master for bench tes
 cd tests/host && cmake -B build . && cmake --build build && ctest --test-dir build
 ```
 
-- `test_fleet_tlv` — encode/decode
-- `test_host_registry` — HELLO/REPORT ingest
-- `test_fleet_uplink_path` — registry → JSON `hosts[]`
+- `test_fleet_tlv` — encode/decode + envelope/metric map
+- `test_host_registry` — legacy catalog + dynamic envelope ingest
+- `test_fleet_uplink_path` — registry → host-owned `schemaId` JSON
 
-## Known gaps (not device bugs)
+## Design
 
-- Cloud batch POST may return **HTTP 400** until the backend schema accepts `hosts[]`.
-- `report_interval_ms` in the manifest is documentation today; host firmware uses 1 s in `zigbee_report.cpp`.
+See `docs/superpowers/specs/2026-09-03-host-owned-zigbee-envelope-design.md`.

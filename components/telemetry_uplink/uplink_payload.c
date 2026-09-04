@@ -440,19 +440,22 @@ int uplink_events_from_snapshot(const uplink_snapshot_t *snap, const uplink_emit
 
     for (uint8_t hi = 0; hi < snap->host_count && hi < UPLINK_MAX_HOSTS; hi++) {
         const uplink_host_report_t *h = &snap->hosts[hi];
-        const char *host_schema = uplink_schema_for_host(h->host_type_id);
-        if (host_schema == NULL || h->device_id[0] == '\0') {
+        if (h->device_id[0] == '\0' || h->schema_id[0] == '\0') {
             continue;
         }
         if (*count >= max_out) {
             return 0; /* Cap reached — send what we have; rest arrive next tick. */
         }
         char host_node[48];
-        uplink_host_node_id(h->device_id, host_node, sizeof(host_node));
+        if (h->node_id[0] != '\0') {
+            snprintf(host_node, sizeof(host_node), "%s", h->node_id);
+        } else {
+            uplink_host_node_id(h->device_id, host_node, sizeof(host_node));
+        }
         char payload[512];
-        /* One 1088 event per host with height/smooth/temp/signal/tilt bundled. */
+        /* One event per host; schemaId/node_id come from the Zigbee host. */
         if (uplink_payload_build_host_report_payload(h, payload, sizeof(payload)) > 0 &&
-            fill_event(&out[*count], h->device_id, host_node, host_schema, snap->ts_ms,
+            fill_event(&out[*count], h->device_id, host_node, h->schema_id, snap->ts_ms,
                        payload) == 0) {
             (*count)++;
         }

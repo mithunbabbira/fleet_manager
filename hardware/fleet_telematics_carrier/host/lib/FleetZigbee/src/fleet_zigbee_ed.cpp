@@ -135,16 +135,28 @@ static void clearJoinState(void)
 }
 
 static bool sendTlv(fleet_msg_type_t type, const FleetZigbeeReading *readings, size_t count,
-                    uint8_t status, uint8_t seq)
+                    uint8_t status, uint8_t seq, bool include_metric_map)
 {
     fleet_encode_input_t in{};
     in.msg_type = type;
     strncpy(in.header.device_id, s_cfg.deviceId, sizeof(in.header.device_id) - 1);
+    strncpy(in.header.node_id, s_cfg.nodeId, sizeof(in.header.node_id) - 1);
+    strncpy(in.header.schema_id, s_cfg.schemaId, sizeof(in.header.schema_id) - 1);
+    strncpy(in.header.host_type, s_cfg.hostType, sizeof(in.header.host_type) - 1);
     in.header.host_type_id = s_cfg.hostTypeId;
     in.header.seq = seq;
     in.header.ts_ms = nowMs();
     in.header.status = status;
     in.header.manifest_version = s_cfg.manifestVersion;
+
+    if (include_metric_map && s_cfg.metricMap[0] &&
+        in.reading_count < FLEET_TLV_MAX_READINGS) {
+        fleet_tlv_value_t *map = &in.readings[in.reading_count++];
+        map->tlv_id = FLEET_TLV_METRIC_MAP;
+        map->type = FLEET_VAL_STRING;
+        map->valid = true;
+        strncpy(map->value.str, s_cfg.metricMap, sizeof(map->value.str) - 1);
+    }
 
     for (size_t i = 0; i < count && in.reading_count < FLEET_TLV_MAX_READINGS; i++) {
         fleet_tlv_value_t *out = &in.readings[in.reading_count++];
@@ -187,7 +199,8 @@ void fleetZigbeeEdBegin(const FleetZigbeeConfig *cfg)
     s_seq = 0;
     s_rejoin_next_ms = 0;
     s_rejoin_backoff_ms = 2000;
-    Serial.printf("[zb] device=%s type=%u\n", s_cfg.deviceId, (unsigned)s_cfg.hostTypeId);
+    Serial.printf("[zb] device=%s node=%s schema=%s type=%u\n", s_cfg.deviceId, s_cfg.nodeId,
+                  s_cfg.schemaId, (unsigned)s_cfg.hostTypeId);
 #if defined(FLEET_ZIGBEE_ED_RADIO) && FLEET_ZIGBEE_ED_RADIO
     radioStart();
 #endif
@@ -203,7 +216,8 @@ bool fleetZigbeeEdSendHello(void)
         return false;
     }
 #endif
-    const bool ok = sendTlv(FLEET_MSG_HELLO, nullptr, 0, FLEET_STATUS_SENSOR_CONNECTED, ++s_seq);
+    const bool ok = sendTlv(FLEET_MSG_HELLO, nullptr, 0, FLEET_STATUS_SENSOR_CONNECTED, ++s_seq,
+                            true);
     if (ok) {
         s_joined = true;
     } else {
@@ -224,7 +238,7 @@ bool fleetZigbeeEdSendReport(const FleetZigbeeReading *readings, size_t count, u
         return false;
     }
 #endif
-    const bool ok = sendTlv(FLEET_MSG_REPORT, readings, count, status, seq);
+    const bool ok = sendTlv(FLEET_MSG_REPORT, readings, count, status, seq, false);
     /* Do not clearJoinState on a single TX fail — BLE coexistence often
      * drops one frame; tearing join caused report bursts then long gaps. */
     return ok;

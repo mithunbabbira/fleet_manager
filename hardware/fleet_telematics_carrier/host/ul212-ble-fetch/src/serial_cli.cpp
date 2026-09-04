@@ -31,7 +31,9 @@ static void printHelp() {
       "  config            NVS settings (mac, id, poll)\n"
       "  scan              BLE scan ~5s for UL212 (service 0xFFE0)\n"
       "  mac AA:BB:...     set sensor MAC (save to persist)\n"
-      "  id ul212-001      set Zigbee device_id (save to persist)\n"
+      "  id ul212-001      set Zigbee device_id (also refreshes default node_id)\n"
+      "  node node-ul212-001  set cloud node_id\n"
+      "  schema 1088       set cloud schemaId\n"
       "  poll <ms>         poll interval, min 200 (save to persist)\n"
       "  silence <ms>      silence timeout, min 3000 (save to persist)\n"
       "  save              write NVS and reboot\n"
@@ -42,7 +44,8 @@ static void printConfig() {
   Serial.printf("mac=%s\n", s_app.sensorMac[0] ? s_app.sensorMac : "(not set)");
   Serial.printf("poll=%lu ms silence=%lu ms\n", (unsigned long)s_app.pollIntervalMs,
                 (unsigned long)s_app.silenceTimeoutMs);
-  Serial.printf("device_id=%s host_type_id=%u\n", s_zb.deviceId,
+  Serial.printf("device_id=%s node_id=%s schema_id=%s host_type=%s host_type_id=%u\n",
+                s_zb.deviceId, s_zb.nodeId, s_zb.schemaId, s_zb.hostType,
                 (unsigned)s_zb.hostTypeId);
 }
 
@@ -137,7 +140,22 @@ static void dispatch(char *line) {
       return;
     }
     strncpy(s_zb.deviceId, sp, sizeof(s_zb.deviceId) - 1);
-    Serial.printf("device_id set to %s (run save to persist)\n", s_zb.deviceId);
+    snprintf(s_zb.nodeId, sizeof(s_zb.nodeId), "node-%s", s_zb.deviceId);
+    Serial.printf("device_id=%s node_id=%s (run save to persist)\n", s_zb.deviceId, s_zb.nodeId);
+  } else if (strcmp(line, "node") == 0) {
+    if (!sp[0] || strlen(sp) >= FLEET_ZB_NODE_ID_MAX) {
+      Serial.println("usage: node node-ul212-001");
+      return;
+    }
+    strncpy(s_zb.nodeId, sp, sizeof(s_zb.nodeId) - 1);
+    Serial.printf("node_id set to %s (run save to persist)\n", s_zb.nodeId);
+  } else if (strcmp(line, "schema") == 0) {
+    if (!sp[0] || strlen(sp) >= FLEET_ZB_SCHEMA_ID_MAX) {
+      Serial.println("usage: schema 1088");
+      return;
+    }
+    strncpy(s_zb.schemaId, sp, sizeof(s_zb.schemaId) - 1);
+    Serial.printf("schema_id set to %s (run save to persist)\n", s_zb.schemaId);
   } else if (strcmp(line, "poll") == 0) {
     const uint32_t v = (uint32_t)strtoul(sp, nullptr, 10);
     if (v < 200) {

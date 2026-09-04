@@ -23,6 +23,7 @@ extern "C" {
 typedef struct {
     char key[FLEET_MANIFEST_KEY_MAX];
     char unit[FLEET_MANIFEST_UNIT_MAX];
+    uint16_t tlv_id;
     double value;
     bool valid;
     uint64_t ts_ms;
@@ -30,6 +31,8 @@ typedef struct {
 
 typedef struct {
     char device_id[FLEET_DEVICE_ID_MAX];
+    char node_id[FLEET_NODE_ID_MAX];
+    char schema_id[FLEET_SCHEMA_ID_MAX];
     char host_type[FLEET_MANIFEST_TYPE_NAME_MAX];
     uint16_t host_type_id;
     uint16_t short_addr;

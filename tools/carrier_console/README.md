@@ -21,7 +21,18 @@ python3 tools/carrier_console/app.py --port /dev/cu.usbmodem1101
 
 Open **http://127.0.0.1:8766** (Host Console uses **8765**).
 
-The **Connected hosts** panel parses `fleet hosts` output automatically (refreshes every 5s while serial is connected). Hosts go **offline** if no Zigbee report arrives for 5s (UI uses carrier uptime vs `last_seen_ms`; firmware 1.0.11+ also clears `link_ok` on snapshot). The **Carrier** column shows firmware, LTE, Zigbee activity, and uplink state from serial responses.
+The **Connected hosts** panel parses `fleet hosts` output automatically (refreshes every 5s while serial is connected). Hosts go **offline** if no Zigbee report arrives for **20s** (UI uses carrier uptime vs `last_seen_ms`; firmware also clears `link_ok` on snapshot). Host cards show uplink envelope fields (`node=` / `schema=`). The **Carrier** column shows firmware, LTE, Zigbee activity, and uplink state from serial responses. On connect/refresh the console also runs `config`, `ota status`, `lte`, and `uplink` so identity/form fields and Diagnostics path tiles fill without extra clicks. **OBD Active profile** is loaded via `profiles` (NVS PID set — separate from CAN protocol auto-detect).
+
+### OBD protocol vs profile
+
+| Concept | What it is | Auto on OBD plug-in? | Saved? |
+|---------|------------|----------------------|--------|
+| **Protocol** | ISO 15765-4 CAN 11/29 @ 250/500 (Vehicle link) | Yes — firmware sweeps until ECU answers `0100` | Yes — NVS, reused next boot |
+| **Profile** | Named PID poll list (`fleet_basic`, …) | No — not from the connector | Yes — NVS active name; set via **Set profile** |
+
+### Diagnostics
+
+The **Diagnostics** card (below Connected hosts) shows per-host uplink envelope fields (`node_id`, `schema_id`), link freshness, a readings summary, carrier Zigbee radio/report counts, and **Carrier path** tiles (GPS fix, last uplink HTTP, SD queue). Dashboard refresh also runs `uplink` so those lines arrive without a separate command. Use **Copy fleet snapshot** for clipboard JSON (includes `carrier_path`).
 
 ## What you can configure
 

@@ -16,3 +16,4 @@ examples/**/sdkconfig
 .cache/
 build-host/
 .gitnexus
+tools/carrier_console/.venv/

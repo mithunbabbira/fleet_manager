@@ -264,7 +264,8 @@ Virtual ids: suffix after last `-` of carrier `device_id` → `gps-{suffix}` / `
 | `{key}` | number | e.g. `height_mm`, `tilt_deg` — only if that reading is valid |
 | `{key}_unit` | string | Present only when the reading has a non-empty unit |
 
-Host `device_id` = provisioned host id. Host `node_id` = `node-{host_device_id}`.  
+Host `device_id` / `node_id` / `schemaId` are **sent by the Zigbee host** (TLV envelope).
+Carrier no longer invents `node-{device_id}` or maps `host_type_id → 1088` for uplink.
 `ts_ms` = **carrier tick time** (shared time base for the batch).
 
 A host quiet for >2 minutes is dropped from uplink so stale values are not re-sent.

@@ -39,6 +39,30 @@ int main(void)
     assert(out.header.seq == 7);
     assert(out.reading_count == 2);
 
+    /* Envelope fields round-trip. */
+    memset(&in, 0, sizeof(in));
+    in.msg_type = FLEET_MSG_HELLO;
+    strncpy(in.header.device_id, "ul212-001", sizeof(in.header.device_id) - 1);
+    strncpy(in.header.node_id, "node-ul212-001", sizeof(in.header.node_id) - 1);
+    strncpy(in.header.schema_id, "1088", sizeof(in.header.schema_id) - 1);
+    strncpy(in.header.host_type, "ul212_ble_fetch", sizeof(in.header.host_type) - 1);
+    in.header.host_type_id = 1;
+    in.header.seq = 1;
+    in.reading_count = 1;
+    in.readings[0].tlv_id = FLEET_TLV_METRIC_MAP;
+    in.readings[0].type = FLEET_VAL_STRING;
+    in.readings[0].valid = true;
+    strncpy(in.readings[0].value.str, "16:height_mm:mm:f;19:signal::u8",
+            sizeof(in.readings[0].value.str) - 1);
+    n = fleet_tlv_encode(&in, buf, sizeof(buf));
+    assert(n > 0);
+    assert(fleet_tlv_decode(buf, (size_t)n, &out) == 0);
+    assert(fleet_tlv_header_has_envelope(&out.header));
+    assert(strcmp(out.header.node_id, "node-ul212-001") == 0);
+    assert(strcmp(out.header.schema_id, "1088") == 0);
+    assert(out.reading_count == 1);
+    assert(out.readings[0].tlv_id == FLEET_TLV_METRIC_MAP);
+
     uint16_t crc = fleet_tlv_crc16(buf, (size_t)n - 2);
     uint16_t got = (uint16_t)(buf[n - 2] | ((uint16_t)buf[n - 1] << 8));
     assert(crc == got);

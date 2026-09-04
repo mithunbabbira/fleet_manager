@@ -349,6 +349,8 @@ static void store_host_report(const telemetry_host_report_t *rep)
             s_host_rx_ms[i] = now_ms();
             s_hosts[i].host_type_id = rep->host_type_id;
             snprintf(s_hosts[i].host_type, sizeof(s_hosts[i].host_type), "%s", rep->host_type);
+            snprintf(s_hosts[i].node_id, sizeof(s_hosts[i].node_id), "%s", rep->node_id);
+            snprintf(s_hosts[i].schema_id, sizeof(s_hosts[i].schema_id), "%s", rep->schema_id);
             s_hosts[i].ts_ms = rep->ts_ms;
             s_hosts[i].reading_count = rep->reading_count;
             if (s_hosts[i].reading_count > UPLINK_MAX_HOST_READINGS) {
@@ -382,6 +384,8 @@ static void store_host_report(const telemetry_host_report_t *rep)
     uplink_host_report_t *h = &s_hosts[slot];
     memset(h, 0, sizeof(*h));
     snprintf(h->device_id, sizeof(h->device_id), "%s", rep->device_id);
+    snprintf(h->node_id, sizeof(h->node_id), "%s", rep->node_id);
+    snprintf(h->schema_id, sizeof(h->schema_id), "%s", rep->schema_id);
     snprintf(h->host_type, sizeof(h->host_type), "%s", rep->host_type);
     h->host_type_id = rep->host_type_id;
     h->ts_ms = rep->ts_ms;

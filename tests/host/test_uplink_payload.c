@@ -145,6 +145,8 @@ int main(void)
     emit.include_gps = false;
     snap.host_count = 1;
     snprintf(snap.hosts[0].device_id, sizeof(snap.hosts[0].device_id), "%s", "ul212-001");
+    snprintf(snap.hosts[0].node_id, sizeof(snap.hosts[0].node_id), "%s", "node-ul212-001");
+    snprintf(snap.hosts[0].schema_id, sizeof(snap.hosts[0].schema_id), "%s", "1088");
     snprintf(snap.hosts[0].host_type, sizeof(snap.hosts[0].host_type), "%s", "ul212_ble_fetch");
     snap.hosts[0].host_type_id = 1;
     snap.hosts[0].ts_ms = 1710000001100ULL;

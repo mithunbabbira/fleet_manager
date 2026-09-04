@@ -42,7 +42,9 @@ HOST_USB_SN = "58:E6:C5:DB:7B:D4"  # refuse — Host Console owns this device
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 HOST_COUNT_RE = re.compile(r"host_count=(\d+)\s+joined=(\d+)")
-HOST_LINE_RE = re.compile(r"^\s{2}(\S+)\s+type=(\S+)\s+id=(\d+)\s+link=(\d+)\s+last=(\d+)")
+HOST_LINE_RE = re.compile(
+    r"^\s{2}(\S+)\s+type=(\S+)\s+id=(\d+)(?:\s+node=(\S+)\s+schema=(\S+))?\s+link=(\d+)\s+last=(\d+)"
+)
 READING_RE = re.compile(r"^\s{4}(\S+)=(-?[\d.]+)(?:\s+(\S+))?")
 METRICS_RE = re.compile(r"^metrics=(\{.*\})$")
 CAN_RE = re.compile(r"^can_ready=(\w+) protocol=(\S+) poller=(\w+) profile=(\S+)")
@@ -228,12 +230,26 @@ class SerialBridge:
         self._schedule_broadcast({"type": "tx", "line": line.strip()})
 
     def refresh_dashboard(self, timeout: float = 5.0) -> dict[str, Any]:
-        """Send status + fleet hosts sequentially; wait for fleet block."""
+        """
+        Send quick host updates (status + fleet hosts) frequently, and only run
+        slow LTE/OTA/uplink commands on a slower cadence.
+
+        This keeps Zigbee-fueled host cards responsive while still letting the
+        UI monitor other carrier health over time.
+        """
         if not self.connected:
             raise RuntimeError("not connected")
+
+        # Heavy carrier queries (LTE/OTA/uplink/GNSS/SD reads) can take seconds.
+        # If we run them every 5s, host card updates can appear delayed.
+        now_mono = time.monotonic()
+        slow_interval_s = 30.0
+        last_slow = getattr(self, "_last_slow_refresh_monotonic", 0.0)
+        do_slow = (now_mono - last_slow) >= slow_interval_s
+
         with self._cmd_lock:
             self.send_line("status")
-            time.sleep(0.8)
+            time.sleep(0.5)
             done = threading.Event()
             self._fleet_waiters.append(done)
             try:
@@ -244,6 +260,19 @@ class SerialBridge:
                     self._fleet_waiters.remove(done)
             if self._fleet_snap is not None:
                 self._finish_fleet_parse()
+
+            # Slow cadence: carrier identity + LTE + uplink status.
+            if do_slow:
+                # Fill Carrier Console forms + KV (parse in UI / dashboard).
+                self.send_line("config")
+                time.sleep(0.2)
+                self.send_line("ota status")
+                time.sleep(0.2)
+                self.send_line("lte")
+                time.sleep(0.2)
+                self.send_line("uplink")
+                time.sleep(0.35)
+                self._last_slow_refresh_monotonic = time.monotonic()
         snap = self.dashboard_snapshot()
         self._schedule_broadcast({"type": "dashboard", "data": snap})
         return snap
@@ -304,8 +333,10 @@ class SerialBridge:
                         "device_id": hm.group(1),
                         "host_type": hm.group(2),
                         "host_type_id": int(hm.group(3)),
-                        "link": hm.group(4),
-                        "last": hm.group(5),
+                        "node_id": hm.group(4) if hm.group(4) else "",
+                        "schema_id": hm.group(5) if hm.group(5) else "",
+                        "link": hm.group(6),
+                        "last": hm.group(7),
                         "readings": {},
                     }
                     self._fleet_snap["hosts"].append(self._fleet_host)
@@ -427,7 +458,7 @@ async def index() -> FileResponse:
 
 
 @app.get("/api/ports")
-async def list_ports() -> dict[str, list[dict[str, str]]]:
+async def list_ports() -> dict[str, Any]:
     ports = []
     for p in serial.tools.list_ports.comports():
         ports.append(

@@ -36,6 +36,9 @@ int main(void)
     memset(&in, 0, sizeof(in));
     in.msg_type = FLEET_MSG_REPORT;
     strncpy(in.header.device_id, "ul212-001", sizeof(in.header.device_id) - 1);
+    strncpy(in.header.node_id, "node-ul212-001", sizeof(in.header.node_id) - 1);
+    strncpy(in.header.schema_id, "1088", sizeof(in.header.schema_id) - 1);
+    strncpy(in.header.host_type, "ul212_ble_fetch", sizeof(in.header.host_type) - 1);
     in.header.host_type_id = 1;
     in.header.seq = 1;
     in.header.ts_ms = 5000;
@@ -54,6 +57,8 @@ int main(void)
     fleet_registry_snapshot_t reg;
     assert(host_registry_snapshot(&reg));
     assert(reg.host_count == 1);
+    assert(strcmp(reg.hosts[0].schema_id, "1088") == 0);
+    assert(strcmp(reg.hosts[0].node_id, "node-ul212-001") == 0);
 
     uplink_snapshot_t snap;
     memset(&snap, 0, sizeof(snap));
@@ -65,6 +70,8 @@ int main(void)
         const fleet_registry_host_t *h = &reg.hosts[i];
         uplink_host_report_t *uh = &snap.hosts[i];
         snprintf(uh->device_id, sizeof(uh->device_id), "%s", h->device_id);
+        snprintf(uh->node_id, sizeof(uh->node_id), "%s", h->node_id);
+        snprintf(uh->schema_id, sizeof(uh->schema_id), "%s", h->schema_id);
         snprintf(uh->host_type, sizeof(uh->host_type), "%s", h->host_type);
         uh->host_type_id = h->host_type_id;
         uh->ts_ms = h->last_seen_ms;
@@ -95,10 +102,12 @@ int main(void)
     assert(strstr(buf, "\"height_mm\":") != NULL);
     assert(strstr(buf, "\"host_type\":\"ul212_ble_fetch\"") != NULL);
     assert(strstr(buf, "\"device_id\":\"ul212-001\"") != NULL);
+    assert(strstr(buf, "\"node_id\":\"node-ul212-001\"") != NULL);
     assert(reg.hosts[0].readings[0].valid);
     assert(reg.hosts[0].readings[0].value > 40.8 && reg.hosts[0].readings[0].value < 41.0);
     assert(strstr(buf, "\"key\":\"height_mm\"") == NULL);
     assert(strstr(buf, "\"hosts\":[") == NULL);
+    assert(uplink_schema_for_host(1) == NULL);
 
     printf("test_fleet_uplink_path: PASS\n");
     return 0;

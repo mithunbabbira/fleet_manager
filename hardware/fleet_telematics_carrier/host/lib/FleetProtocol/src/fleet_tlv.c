@@ -15,6 +15,20 @@ static size_t tlv_write(uint8_t *out, size_t out_len, size_t off, uint16_t id,
     return off + val_len;
 }
 
+static size_t append_string_tlv(uint8_t *buf, size_t buf_len, size_t off, uint16_t id,
+                                const char *s, size_t max_len)
+{
+    if (!s || !s[0]) {
+        return off;
+    }
+    size_t n = strlen(s);
+    if (n >= max_len) {
+        n = max_len - 1;
+    }
+    size_t next = tlv_write(buf, buf_len, off, id, FLEET_VAL_STRING, s, n);
+    return next ? next : 0;
+}
+
 uint16_t fleet_tlv_crc16(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFF;
@@ -77,6 +91,20 @@ static int append_header_tlvs(const fleet_frame_header_t *hdr, uint8_t *buf, siz
         }
     }
 
+    o = append_string_tlv(buf, buf_len, o, FLEET_TLV_NODE_ID, hdr->node_id, FLEET_NODE_ID_MAX);
+    if (!o) {
+        return -1;
+    }
+    o = append_string_tlv(buf, buf_len, o, FLEET_TLV_SCHEMA_ID, hdr->schema_id, FLEET_SCHEMA_ID_MAX);
+    if (!o) {
+        return -1;
+    }
+    o = append_string_tlv(buf, buf_len, o, FLEET_TLV_HOST_TYPE, hdr->host_type,
+                          FLEET_HOST_TYPE_NAME_MAX);
+    if (!o) {
+        return -1;
+    }
+
     *off = o;
     return 0;
 }
@@ -87,7 +115,7 @@ int fleet_tlv_encode(const fleet_encode_input_t *in, uint8_t *out, size_t out_le
         return -1;
     }
 
-    uint8_t hdr_buf[64];
+    uint8_t hdr_buf[128];
     size_t hdr_off = 0;
     if (append_header_tlvs(&in->header, hdr_buf, sizeof(hdr_buf), &hdr_off) != 0) {
         return -1;
@@ -115,10 +143,15 @@ int fleet_tlv_encode(const fleet_encode_input_t *in, uint8_t *out, size_t out_le
             n = tlv_write(body_buf, sizeof(body_buf), body_off, r->tlv_id, FLEET_VAL_INT32,
                           &r->value.i32, sizeof(int32_t));
             break;
-        case FLEET_VAL_STRING:
+        case FLEET_VAL_STRING: {
+            size_t slen = strlen(r->value.str);
+            if (slen >= sizeof(r->value.str)) {
+                slen = sizeof(r->value.str) - 1;
+            }
             n = tlv_write(body_buf, sizeof(body_buf), body_off, r->tlv_id, FLEET_VAL_STRING,
-                          r->value.str, strlen(r->value.str));
+                          r->value.str, slen);
             break;
+        }
         default:
             return -1;
         }
@@ -146,6 +179,15 @@ int fleet_tlv_encode(const fleet_encode_input_t *in, uint8_t *out, size_t out_le
     return (int)total;
 }
 
+static void copy_header_string(char *dst, size_t dst_len, const uint8_t *src, uint8_t vlen)
+{
+    if (vlen >= dst_len) {
+        return;
+    }
+    memcpy(dst, src, vlen);
+    dst[vlen] = '\0';
+}
+
 static int parse_tlv_block(const uint8_t *buf, size_t len, fleet_decoded_frame_t *out,
                            bool is_header)
 {
@@ -161,9 +203,27 @@ static int parse_tlv_block(const uint8_t *buf, size_t len, fleet_decoded_frame_t
         if (is_header) {
             switch (id) {
             case FLEET_TLV_DEVICE_ID:
-                if (type == FLEET_VAL_STRING && vlen < FLEET_DEVICE_ID_MAX) {
-                    memcpy(out->header.device_id, buf + off, vlen);
-                    out->header.device_id[vlen] = '\0';
+                if (type == FLEET_VAL_STRING) {
+                    copy_header_string(out->header.device_id, sizeof(out->header.device_id),
+                                       buf + off, vlen);
+                }
+                break;
+            case FLEET_TLV_NODE_ID:
+                if (type == FLEET_VAL_STRING) {
+                    copy_header_string(out->header.node_id, sizeof(out->header.node_id), buf + off,
+                                       vlen);
+                }
+                break;
+            case FLEET_TLV_SCHEMA_ID:
+                if (type == FLEET_VAL_STRING) {
+                    copy_header_string(out->header.schema_id, sizeof(out->header.schema_id),
+                                       buf + off, vlen);
+                }
+                break;
+            case FLEET_TLV_HOST_TYPE:
+                if (type == FLEET_VAL_STRING) {
+                    copy_header_string(out->header.host_type, sizeof(out->header.host_type),
+                                       buf + off, vlen);
                 }
                 break;
             case FLEET_TLV_HOST_TYPE_ID:
@@ -279,11 +339,15 @@ int fleet_tlv_decode(const uint8_t *in, size_t in_len, fleet_decoded_frame_t *ou
     if (parse_tlv_block(in + 4, hdr_len, out, true) != 0) {
         return -1;
     }
-    if (body_len > 0 &&
-        parse_tlv_block(in + 4 + hdr_len, body_len, out, false) != 0) {
+    if (body_len > 0 && parse_tlv_block(in + 4 + hdr_len, body_len, out, false) != 0) {
         return -1;
     }
     return 0;
+}
+
+bool fleet_tlv_header_has_envelope(const fleet_frame_header_t *hdr)
+{
+    return hdr != NULL && hdr->node_id[0] != '\0' && hdr->schema_id[0] != '\0';
 }
 
 bool fleet_tlv_header_valid(const fleet_frame_header_t *hdr)
@@ -291,8 +355,9 @@ bool fleet_tlv_header_valid(const fleet_frame_header_t *hdr)
     if (!hdr || !hdr->device_id[0]) {
         return false;
     }
-    if (hdr->host_type_id == 0) {
-        return false;
+    /* Legacy: known host_type_id. Dynamic: cloud envelope from host. */
+    if (hdr->host_type_id != 0) {
+        return true;
     }
-    return true;
+    return fleet_tlv_header_has_envelope(hdr);
 }
