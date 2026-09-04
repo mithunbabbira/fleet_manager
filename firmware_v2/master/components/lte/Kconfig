@@ -1,0 +1,53 @@
+menu "LTE modem (EC200U)"
+
+    config LTE_ENABLE
+        bool "Enable EC200U LTE UART (QHTTP AT)"
+        default y
+        help
+            Uses UART1 GPIO16 (ESP TX → modem RX) / GPIO17 (ESP RX ← modem TX).
+            Matches the printed carrier PCB (KiCad Vehical Telematics Design).
+            Requires the modem wired to the ESP32-C6 (not only PC USB).
+
+    config LTE_UART_PORT
+        int "UART port number"
+        default 1
+        depends on LTE_ENABLE
+
+    config LTE_UART_TX_GPIO
+        int "Modem UART TX GPIO (ESP → modem RX)"
+        default 16
+        depends on LTE_ENABLE
+
+    config LTE_UART_RX_GPIO
+        int "Modem UART RX GPIO (ESP ← modem TX)"
+        default 17
+        depends on LTE_ENABLE
+
+    config LTE_UART_BAUD
+        int "Modem UART baud"
+        default 115200
+        depends on LTE_ENABLE
+
+    config LTE_APN
+        string "Cellular APN"
+        default "airtelgprs.com"
+        depends on LTE_ENABLE
+
+    config LTE_GPS_ENABLE
+        bool "Enable EC200U GNSS for uplink lat/lng"
+        default y
+        depends on LTE_ENABLE
+
+    config LTE_GPS_REFRESH_S
+        int "GNSS refresh interval (seconds)"
+        default 10
+        range 5 120
+        depends on LTE_GPS_ENABLE
+
+    config LTE_GPS_MAX_AGE_S
+        int "Max GNSS fix age before gps_ok=false (seconds)"
+        default 120
+        range 30 600
+        depends on LTE_GPS_ENABLE
+
+endmenu
