@@ -45,6 +45,20 @@
 - Custom cluster 0xFC00; dynamic registry
 - **Deferred (not implemented):** Zigbee install codes / TC-link key commissioning and unique EPAN per truck — see “hardening” note in project status; needed before multi-truck RF isolation beyond “different channel”
 
+## Build (ESP-IDF)
+
+This tree is built and configured for **ESP-IDF 5.2.3** (`~/esp/esp-idf`).
+
+```bash
+source ~/esp/esp-idf/export.sh   # must report ESP-IDF v5.2.3
+cd firmware_v2/master
+idf.py build
+# Prefer Trafyn OTA for device updates. USB flash only for recovery:
+# idf.py -p /dev/cu.usbmodemXXXX erase-flash flash
+```
+
+Do **not** use `~/.espressif/tools/activate_idf_v6.0.1.sh` for this project — IDF 6 lacks the `json` component this app `REQUIRES`, so `idf.py` configure/flash fails there.
+
 ## Lab OTA test
 
 1. Build → `build/fleet_v2_master.bin`

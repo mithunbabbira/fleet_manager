@@ -953,7 +953,38 @@ static esp_err_t at_wait_token_locked(char *resp, size_t resp_len, int timeout_m
 }
 
 /**
- * @brief Ensure PDP: QICSGP + QIACT=1 (ERROR OK if already up) + parse IP from QIACT?.
+ * @brief Parse +QIACT? response into s_status.ip; set ip_up/link_up when IP found.
+ * @return true if a non-empty IP was captured.
+ */
+static bool pdp_parse_ip_locked(char *resp, size_t resp_len)
+{
+    if (at_transact_locked("AT+QIACT?", resp, resp_len, 5000) != ESP_OK) {
+        return false;
+    }
+    char *first = strchr(resp, '"');
+    if (!first) {
+        return false;
+    }
+    first++;
+    size_t i = 0;
+    while (*first && *first != '"' && i + 1 < sizeof(s_status.ip)) {
+        s_status.ip[i++] = *first++;
+    }
+    s_status.ip[i] = '\0';
+    if (i == 0) {
+        return false;
+    }
+    s_status.ip_up = true;
+    s_status.link_up = true;
+    return true;
+}
+
+/**
+ * @brief Ensure PDP: QICSGP + activate context; recover with QIDEACT if stuck.
+ *
+ * If QIACT? already has an IP, skip QIACT=1 (avoids noisy ERROR when already up).
+ * Otherwise activate; on failure deactivate once and retry activate.
+ *
  * @return ESP_OK if IP present; ESP_FAIL otherwise.
  */
 static esp_err_t ensure_pdp_locked(char *resp, size_t resp_len)
@@ -962,29 +993,27 @@ static esp_err_t ensure_pdp_locked(char *resp, size_t resp_len)
     snprintf(cmd, sizeof(cmd), "AT+QICSGP=1,1,\"%s\",\"\",\"\",0", CONFIG_LTE_APN);
     at_transact_locked(cmd, resp, resp_len, 3000);
 
-    esp_err_t act = at_transact_locked("AT+QIACT=1", resp, resp_len, 30000);
-    if (act != ESP_OK || strstr(resp, "ERROR") != NULL) {
-        /* Already active is fine on many firmwares. */
-        if (strstr(resp, "ERROR") != NULL) {
-            ESP_LOGW(TAG, "QIACT: %s", resp);
-        }
+    if (pdp_parse_ip_locked(resp, resp_len)) {
+        return ESP_OK;
     }
 
-    if (at_transact_locked("AT+QIACT?", resp, resp_len, 5000) == ESP_OK) {
-        char *first = strchr(resp, '"');
-        if (first) {
-            first++;
-            size_t i = 0;
-            while (*first && *first != '"' && i + 1 < sizeof(s_status.ip)) {
-                s_status.ip[i++] = *first++;
-            }
-            s_status.ip[i] = '\0';
-            if (i > 0) {
-                s_status.ip_up = true;
-                s_status.link_up = true;
-                return ESP_OK;
-            }
+    esp_err_t act = at_transact_locked("AT+QIACT=1", resp, resp_len, 30000);
+    if (act == ESP_OK && strstr(resp, "ERROR") == NULL) {
+        if (pdp_parse_ip_locked(resp, resp_len)) {
+            return ESP_OK;
         }
+    } else if (strstr(resp, "ERROR") != NULL) {
+        ESP_LOGW(TAG, "QIACT activate failed, trying QIDEACT+retry");
+    }
+
+    at_transact_locked("AT+QIDEACT=1", resp, resp_len, 15000);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    act = at_transact_locked("AT+QIACT=1", resp, resp_len, 30000);
+    if (act != ESP_OK || strstr(resp, "ERROR") != NULL) {
+        ESP_LOGW(TAG, "QIACT retry: %s", resp);
+    }
+    if (pdp_parse_ip_locked(resp, resp_len)) {
+        return ESP_OK;
     }
     return s_status.ip_up ? ESP_OK : ESP_FAIL;
 }
