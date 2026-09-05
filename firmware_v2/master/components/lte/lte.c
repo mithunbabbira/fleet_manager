@@ -198,6 +198,8 @@ esp_err_t lte_time_get(lte_time_t *out)
 /**
  * @brief Raw AT write + collect until OK/ERROR/READY or timeout (caller holds UART mutex).
  * @note Drains stale UART bytes first. Returns ESP_OK when a terminator is seen (even ERROR).
+ * @note Must finish the current line after seeing ERROR so "+CME ERROR: 504" is not truncated
+ *       mid-token (substring "ERROR" appears before ": 504" arrives on the wire).
  */
 static esp_err_t at_transact_locked(const char *cmd, char *resp, size_t resp_len, int timeout_ms)
 {
@@ -223,24 +225,34 @@ static esp_err_t at_transact_locked(const char *cmd, char *resp, size_t resp_len
 
     size_t used = 0;
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    bool saw_result = false;
+    TickType_t line_grace = 0;
     while (xTaskGetTickCount() < deadline) {
         uint8_t ch;
         int got = uart_read_bytes(CONFIG_LTE_UART_PORT, &ch, 1, pdMS_TO_TICKS(50));
         if (got <= 0) {
+            if (saw_result && xTaskGetTickCount() >= line_grace) {
+                return ESP_OK;
+            }
             continue;
         }
         if (resp && used + 1 < resp_len) {
             resp[used++] = (char)ch;
             resp[used] = '\0';
         }
-        if (used >= 2) {
+        if (!saw_result && used >= 2) {
             if (strstr(resp, "OK") != NULL || strstr(resp, "ERROR") != NULL ||
                 strstr(resp, "READY") != NULL) {
-                return ESP_OK;
+                saw_result = true;
+                /* Allow the rest of the line (e.g. ": 504\r\n") to arrive. */
+                line_grace = xTaskGetTickCount() + pdMS_TO_TICKS(80);
             }
         }
+        if (saw_result && ch == '\n') {
+            return ESP_OK;
+        }
     }
-    return ESP_ERR_TIMEOUT;
+    return saw_result ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 /**
@@ -575,22 +587,36 @@ static bool parse_qgpsloc(const char *resp, double *lat_out, double *lng_out)
 #define LTE_GPS_ENABLE_BACKOFF_MS      500
 #define LTE_GPS_ENABLE_BACKOFF_MAX_MS  5000
 
-/* Attempt to turn GNSS on once. Returns true if the modem accepted it, or
- * if it reports a session already active (+CME ERROR: 504 on the EC200U),
- * which we treat as "already enabled" rather than a failure. */
-static bool gps_enable_once(char *resp, size_t resp_len)
+/* True if AT+QGPS=1 reply means GNSS is (now) on. */
+static bool gps_qgps_reply_ok(const char *resp)
 {
-    esp_err_t err = at_transact("AT+QGPS=1", resp, resp_len, 3000);
-    if (err != ESP_OK) {
+    if (resp == NULL || resp[0] == '\0') {
         return false;
     }
-    if (strstr(resp, "ERROR") != NULL) {
-        return strstr(resp, "504") != NULL;
+    /* Already started — do not tear down. */
+    if (strstr(resp, "504") != NULL) {
+        return true;
     }
-    return strstr(resp, "OK") != NULL;
+    return strstr(resp, "OK") != NULL && strstr(resp, "ERROR") == NULL;
 }
 
-#if CONFIG_LTE_GPS_ENABLE
+/* Attempt to turn GNSS on once. Returns true if the modem accepted it, or
+ * if it reports a session already active (+CME ERROR: 504 on the EC200U).
+ * Only issues QGPSEND when start fails with a non-504 error (stuck session). */
+static bool gps_enable_once(char *resp, size_t resp_len)
+{
+    esp_err_t err = at_transact("AT+QGPS=1", resp, resp_len, 5000);
+    if (err == ESP_OK && gps_qgps_reply_ok(resp)) {
+        return true;
+    }
+
+    /* Clear a stuck session, then start again. */
+    (void)at_transact("AT+QGPSEND", resp, resp_len, 2000);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    err = at_transact("AT+QGPS=1", resp, resp_len, 5000);
+    return err == ESP_OK && gps_qgps_reply_ok(resp);
+}
+
 static void gps_task_start(void)
 {
     if (s_gps_mutex == NULL) {
@@ -603,11 +629,10 @@ static void gps_task_start(void)
         }
     }
 }
-#endif
 
 /**
  * @brief Enable GNSS with backoff, then poll QGPSLOC; honors s_suspend_bg_at.
- * @note On CME 505 (inactive), re-enables. Fix can appear even if enable loop "failed".
+ * @note Keeps retrying enable in the poll loop if the first burst fails.
  */
 static void gps_task(void *arg)
 {
@@ -617,6 +642,9 @@ static void gps_task(void *arg)
     while (!s_uart_ready) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+    /* Let bring-up / CPIN / attach settle before first GNSS attempt. */
+    vTaskDelay(pdMS_TO_TICKS(8000));
+    (void)at_transact("AT+CMEE=2", resp, sizeof(resp), 1000);
 
     bool gps_enabled = false;
     int backoff_ms = LTE_GPS_ENABLE_BACKOFF_MS;
@@ -626,9 +654,8 @@ static void gps_task(void *arg)
         }
         if (gps_enable_once(resp, sizeof(resp))) {
             gps_enabled = true;
-            if (attempt > 1) {
-                ESP_LOGI(TAG, "AT+QGPS=1 accepted after %d attempt(s)", attempt);
-            }
+            ESP_LOGI(TAG, "AT+QGPS=1 accepted after %d attempt(s): %s", attempt,
+                     resp[0] ? resp : "OK");
             break;
         }
         if (attempt == 1 || attempt % 8 == 0) {
@@ -641,15 +668,19 @@ static void gps_task(void *arg)
                          : backoff_ms * 2;
     }
     if (!gps_enabled) {
-        ESP_LOGE(TAG, "AT+QGPS=1 never succeeded after %d attempts; GNSS stays off "
-                      "for now (poll loop will keep retrying if a fix attempt "
-                      "reports GNSS inactive)",
+        ESP_LOGW(TAG, "AT+QGPS=1 not accepted yet after %d attempts; will keep retrying",
                  LTE_GPS_ENABLE_ATTEMPTS);
     }
 
     for (;;) {
         while (s_suspend_bg_at) {
             vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        if (!gps_enabled) {
+            if (gps_enable_once(resp, sizeof(resp))) {
+                gps_enabled = true;
+                ESP_LOGI(TAG, "AT+QGPS=1 accepted (retry): %s", resp[0] ? resp : "OK");
+            }
         }
         if (at_transact("AT+QGPSLOC=2", resp, sizeof(resp), 3000) == ESP_OK) {
             double lat = 0.0, lng = 0.0;
@@ -662,18 +693,9 @@ static void gps_task(void *arg)
                     s_gps_fix_ms = esp_timer_get_time() / 1000;
                     xSemaphoreGive(s_gps_mutex);
                 }
-            } else if (strstr(resp, "505") != NULL) {
-                /* "+CME ERROR: 505" = GNSS session not active on the EC200U
-                 * (e.g. modem reset GNSS on its own); re-enable, but only
-                 * when this happens instead of on every poll. */
-                if (gps_enabled) {
-                    ESP_LOGW(TAG, "GNSS reports inactive; re-enabling");
-                }
+            } else if (strstr(resp, "505") != NULL || strstr(resp, "516") != NULL) {
+                ESP_LOGW(TAG, "GNSS inactive/busy (%s); re-enabling", resp);
                 gps_enabled = gps_enable_once(resp, sizeof(resp));
-                if (!gps_enabled) {
-                    ESP_LOGW(TAG, "AT+QGPS=1 re-enable failed: %s",
-                             resp[0] ? resp : "no response");
-                }
             }
         }
         /* Self-throttled; keeps the wall clock alive indoors with no fix. */

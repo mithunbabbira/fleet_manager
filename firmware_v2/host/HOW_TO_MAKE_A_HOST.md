@@ -2,7 +2,9 @@
 
 This guide is for sensor hosts (e.g. UL212 over RS-232 or BLE) that join the **carrier master** over Zigbee and show up in cloud uplink as schema **1088**.
 
-Milestone 1 ships this document only. Host firmware still lives under `hardware/fleet_telematics_carrier/host/` until a later milestone ports it here.
+**Master coordinator:** firmware_v2 master includes the Zigbee coordinator (`transport_zigbee`). Set `CONFIG_FLEET_ZIGBEE_CHANNEL` on the master (default **15**) and use the **same channel** on every host for that truck.
+
+Host application firmware still lives under `hardware/fleet_telematics_carrier/host/` until a later milestone ports it here.
 
 ## Rules that keep trucks from mixing
 

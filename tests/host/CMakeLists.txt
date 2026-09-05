@@ -132,3 +132,52 @@ target_include_directories(test_cli_format_v2 PRIVATE
     ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/lte/include
 )
 add_test(NAME test_cli_format_v2 COMMAND test_cli_format_v2)
+
+add_executable(test_uplink_envelope_v2
+    test_uplink_envelope_v2.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/uplink_envelope.c
+)
+target_include_directories(test_uplink_envelope_v2 PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/include
+)
+target_link_libraries(test_uplink_envelope_v2 m)
+add_test(NAME test_uplink_envelope_v2 COMMAND test_uplink_envelope_v2)
+
+add_executable(test_uplink_obd_v2
+    test_uplink_obd_v2.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/uplink_obd.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/uplink_envelope.c
+)
+target_include_directories(test_uplink_obd_v2 PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/include
+)
+target_link_libraries(test_uplink_obd_v2 m)
+add_test(NAME test_uplink_obd_v2 COMMAND test_uplink_obd_v2)
+
+add_executable(test_uplink_host_v2
+    test_uplink_host_v2.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/uplink_host.c
+)
+target_include_directories(test_uplink_host_v2 PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/include
+)
+target_link_libraries(test_uplink_host_v2 m)
+add_test(NAME test_uplink_host_v2 COMMAND test_uplink_host_v2)
+
+add_executable(test_uplink_queue_v2
+    test_uplink_queue_v2.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/uplink_queue.c
+)
+target_include_directories(test_uplink_queue_v2 PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/include
+)
+add_test(NAME test_uplink_queue_v2 COMMAND test_uplink_queue_v2)
+
+add_executable(test_uplink_batch_v2
+    test_uplink_batch_v2.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/uplink_batch.c
+)
+target_include_directories(test_uplink_batch_v2 PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/include
+)
+add_test(NAME test_uplink_batch_v2 COMMAND test_uplink_batch_v2)

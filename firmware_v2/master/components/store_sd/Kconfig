@@ -1,0 +1,56 @@
+menu "SD uplink store (store_sd)"
+
+    config STORE_SD_ENABLE
+        bool "Mount microSD and enable durable uplink queue"
+        default y
+        help
+            Dedicated SPI pins for SD (defaults SCK4 MOSI5 MISO6 CS18).
+            ESP32-C6 has one GPSPI (SPI2); if MCP also uses SPI2 pins, they must not share wires.
+
+    config STORE_SD_CS_GPIO
+        int "SD card SPI CS GPIO"
+        default 18
+        depends on STORE_SD_ENABLE
+
+    config STORE_SD_SCK_GPIO
+        int "SD SPI SCK GPIO"
+        default 4
+        depends on STORE_SD_ENABLE
+
+    config STORE_SD_MOSI_GPIO
+        int "SD SPI MOSI GPIO"
+        default 5
+        depends on STORE_SD_ENABLE
+
+    config STORE_SD_MISO_GPIO
+        int "SD SPI MISO GPIO"
+        default 6
+        depends on STORE_SD_ENABLE
+
+    config STORE_SD_SPI_HZ
+        int "SD SPI clock (Hz)"
+        default 4000000
+        range 400000 20000000
+        depends on STORE_SD_ENABLE
+
+    config STORE_SD_MAX_QUEUE_BYTES
+        int "Max uplink queue file size (bytes)"
+        default 16777216
+        range 65536 67108864
+        depends on STORE_SD_ENABLE
+        help
+            When exceeded, oldest records are dropped before append.
+
+    config STORE_SD_BATCH_MAX_EVENTS
+        int "Max events per uplink batch POST"
+        default 10
+        range 1 20
+        depends on STORE_SD_ENABLE
+
+    config STORE_SD_BATCH_MAX_BYTES
+        int "Max batch POST body size (bytes)"
+        default 12288
+        range 2048 24576
+        depends on STORE_SD_ENABLE
+
+endmenu

@@ -25,3 +25,20 @@ CONFIG_OTA_CLOUD_AUTO_INTERVAL_H=4
 # Leave auth empty in git — set via USB: ota_token / ota_user
 CONFIG_OTA_CLOUD_AUTH_HEADER=""
 CONFIG_OTA_CLOUD_SYSTEM_USER_ID=""
+
+# M3: telemetry uplink (GPS 1089)
+CONFIG_UPLINK_URL="https://api.trafyn.info/nc-events-api/v2/messages"
+CONFIG_UPLINK_TICK_SEC=30
+
+# M5: Zigbee coordinator + dynamic hosts → 1088
+CONFIG_FLEET_ZIGBEE_ENABLE=y
+CONFIG_FLEET_ZIGBEE_CHANNEL=15
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZCZR=y
+
+# M6: microSD store-on-fail (SPI2 pins frozen)
+CONFIG_STORE_SD_ENABLE=y
+CONFIG_STORE_SD_SCK_GPIO=4
+CONFIG_STORE_SD_MOSI_GPIO=5
+CONFIG_STORE_SD_MISO_GPIO=6
+CONFIG_STORE_SD_CS_GPIO=18

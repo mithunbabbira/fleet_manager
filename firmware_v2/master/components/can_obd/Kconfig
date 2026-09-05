@@ -1,0 +1,56 @@
+menu "Direct CAN OBD (can_obd / MCP2515)"
+
+    config CAN_OBD_SPI_SCK_GPIO
+        int "SPI SCK GPIO"
+        default 21
+
+    config CAN_OBD_SPI_MOSI_GPIO
+        int "SPI MOSI GPIO"
+        default 22
+
+    config CAN_OBD_SPI_MISO_GPIO
+        int "SPI MISO GPIO"
+        default 23
+
+    config CAN_OBD_SPI_CS_GPIO
+        int "SPI CS GPIO"
+        default 20
+
+    config CAN_OBD_INT_GPIO
+        int "MCP2515 INT GPIO (reserved, polled mode for now)"
+        default 14
+
+    choice CAN_OBD_XTAL
+        prompt "MCP2515 crystal frequency"
+        default CAN_OBD_XTAL_8MHZ
+        help
+            Printed on the metal oscillator of the CAN module
+            ("8.000" or "16.000"). Bit timing derives from this.
+
+        config CAN_OBD_XTAL_8MHZ
+            bool "8 MHz"
+        config CAN_OBD_XTAL_16MHZ
+            bool "16 MHz"
+    endchoice
+
+    choice CAN_OBD_PROTOCOL
+        prompt "OBD protocol selection"
+        default CAN_OBD_PROTO_AUTO
+        help
+            Auto sweeps ISO 15765-4 candidates (11/29-bit x 500/250 kbit)
+            until an ECU answers 0100, then persists the winner in NVS.
+            Pin a specific protocol only for known-fleet deployments.
+
+        config CAN_OBD_PROTO_AUTO
+            bool "Auto-detect (recommended)"
+        config CAN_OBD_PROTO_11_500
+            bool "11-bit / 500 kbit"
+        config CAN_OBD_PROTO_11_250
+            bool "11-bit / 250 kbit"
+        config CAN_OBD_PROTO_29_500
+            bool "29-bit / 500 kbit"
+        config CAN_OBD_PROTO_29_250
+            bool "29-bit / 250 kbit"
+    endchoice
+
+endmenu

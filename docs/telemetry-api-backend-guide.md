@@ -1,8 +1,8 @@
 # Fleet telemetry API — backend integration guide
 
 **Audience:** Backend / API developers consuming carrier uplink events  
-**Firmware source of truth:** `components/telemetry_uplink/uplink_payload.c`, `uplink_schema_ids.h`  
-**Last updated:** 2026-09-03
+**Firmware source of truth:** `firmware_v2/master/components/uplink/` (`uplink_envelope.c`, `uplink_obd.c`, `uplink_host.c`, `uplink_batch.c`)  
+**Last updated:** 2026-09-05
 
 ---
 
@@ -16,7 +16,7 @@
 | **Auth from device** | None today |
 | **Transport** | Quectel EC200U LTE modem (HTTPS via QHTTP AT) |
 
-The POST URL can be overridden per device in NVS (Carrier Console / serial). OBD `schemaId` defaults to `1087` and can also be overridden in NVS (`uplink schema`). Host and GPS schema IDs are compile-time (`uplink_schema_ids.h`).
+The POST URL can be overridden per device in NVS (`uplink url <url>` on USB CLI). Schema IDs are compile-time (`UPLINK_SCHEMA_*` in uplink headers).
 
 ---
 
@@ -26,8 +26,8 @@ Every item uses the same top-level envelope. Identity, schema, and time sit **ou
 
 ```json
 {
-  "device_id": "carrier-042",
-  "node_id": "node-042",
+  "device_id": "fleet-demo-001",
+  "node_id": "node-fleet-demo-001",
   "schemaId": "1087",
   "ts_ms": 1710000001000,
   "payload": { }
@@ -38,11 +38,10 @@ Every item uses the same top-level envelope. Identity, schema, and time sit **ou
 
 | Field | Required | Notes |
 |-------|----------|--------|
-| `device_id` | **Yes** | Carrier, virtual `gps-*`, or host id (e.g. `ul212-001`) |
+| `device_id` | **Yes** | Carrier id, virtual `{master}_GPS`, or host id (e.g. `ul212-rs232-001`) |
 | `node_id` | **Yes** | Paired with `device_id` |
 | `schemaId` | **Yes** | `1087` / `1088` / `1089` |
-| `ts_ms` | **Yes** | **UTC** Unix epoch milliseconds when LTE/GPS time is synced; else device uptime ms. Convert to IST (`UTC+5:30`) only for display in India — do not store IST as a fake epoch. |
-
+| `ts_ms` | **Yes** | **UTC** Unix epoch milliseconds when LTE/GPS time is synced; else device uptime ms. Convert to IST (`UTC+5:30`) only for display — do not store IST as a fake epoch. |
 | `payload` | **Yes** | Domain data only — do **not** expect identity/time inside |
 
 Uplink is blocked until the carrier is provisioned with `device_id` + `node_id` (NVS).
@@ -53,44 +52,51 @@ Uplink is blocked until the carrier is provisioned with `device_id` + `node_id` 
 
 | schemaId | Type | `device_id` example | `node_id` example |
 |----------|------|---------------------|-------------------|
-| `1087` | OBD / vehicle telemetry | `carrier-042` | `node-042` |
-| `1088` | Zigbee host snapshot (UL212) | `ul212-001` | `node-ul212-001` |
-| `1089` | GNSS | `gps-042` | `node-gps-042` |
-
-Edit numbers in `components/telemetry_uplink/include/uplink_schema_ids.h` before build/OTA.
+| `1087` | OBD / vehicle telemetry | `fleet-demo-001` | `node-fleet-demo-001` |
+| `1088` | Zigbee host snapshot (UL212) | `ul212-rs232-001` | `node-ul212-rs232-001` |
+| `1089` | GNSS | `fleet-demo-001_GPS` | `node-fleet-demo-001_GPS` |
 
 ---
 
-## One object vs list of objects
+## Body shape (locked)
 
-**Always normalize on ingest:**
+**Live POST and SD drain** send a JSON **array of bare envelopes**, optionally wrapped for Trafyn:
+
+```json
+{"Vehicle":[ { "device_id": "...", "node_id": "...", "schemaId": "1089", "ts_ms": 1, "payload": { } } ]}
+```
+
+| Build flag | Body |
+|------------|------|
+| `CONFIG_UPLINK_VEHICLE_WRAP=y` (default) | `{"Vehicle":[...]}` — required by current Trafyn API |
+| `CONFIG_UPLINK_VEHICLE_WRAP=n` | bare `[...]` — lab mock (`tools/telemetry_mock`) |
+
+Even one event is still an array inside `Vehicle` (or a bare length-1 array when wrap is off).
+
+**Known Trafyn gap (2026-09-05):** after the Vehicle key is present, API may still return 400 with schema-registry `globalIds/null`. That is a backend/schema-registry issue, not a missing Vehicle key. Device will SD-queue failed POSTs until ingest succeeds.
+
+Normalize on ingest if you still accept legacy single objects:
 
 ```javascript
 const body = await request.json();
 const events = Array.isArray(body) ? body : [body];
 ```
 
-| Path | Body shape | When |
-|------|------------|------|
-| **Live POST** | **Single JSON object** | Exactly **one** event this tick (e.g. only GPS, or only one host, or only OBD) |
-| **Live POST** | **JSON array** of envelopes | **Two or more** events this tick (typical: OBD + GPS + UL212) |
-| **SD batch drain** | **Always JSON array** | Offline queue flush — one or many events |
-
 ### What can appear in one tick
 
-A single produce tick may emit **0..N** events (capped at 12):
+A single produce tick may emit **0..N** events (capped at 12) in **one** array:
 
 | Event | Condition |
 |-------|-----------|
-| `1087` OBD | At least one PID is fresh (≤15 s) **and** OBD included this tick |
-| `1089` GPS | GNSS fix (`gps_ok`) **and** GPS worth sending |
-| `1088` host | One event **per Zigbee host** that has ≥1 valid reading |
+| `1087` OBD | ≥1 fresh PID (≤15 s) |
+| `1089` GPS | GNSS fix (`gps_ok`) **and** move/heartbeat gate (or forced) |
+| `1088` host | One element **per** Zigbee host with ≥1 valid reading |
 
-So:
+Examples:
 
-- Truck + GPS + one UL212 → usually a **3-element array**
-- Only UL212 online, no fresh OBD/GPS → **one object** (`1088`)
-- Bench, no CAN, GPS heartbeat only → **one object** (`1089`) or array if multiple hosts
+- Truck + GPS + one UL212 → **3-element array** in one HTTP POST
+- Bench, no CAN, GPS only → **1-element array** (`1089`)
+- Lab without GPS → use device `uplink test` (synthetic 1089) or restore URL after mock
 
 Return **HTTP 2xx** only on successful ingest. The device keeps SD queue lines until drain gets 2xx.
 
@@ -140,8 +146,8 @@ Typical live/batch POST when the vehicle has OBD, GPS fix, and one UL212 fuel ho
     }
   },
   {
-    "device_id": "gps-042",
-    "node_id": "node-gps-042",
+    "device_id": "fleet-demo-001_GPS",
+    "node_id": "node-fleet-demo-001_GPS",
     "schemaId": "1089",
     "ts_ms": 1710000001000,
     "payload": {
@@ -171,7 +177,9 @@ Typical live/batch POST when the vehicle has OBD, GPS fix, and one UL212 fuel ho
 ]
 ```
 
-### Sample — single object (live POST with only one event)
+### Sample — one-event array (live POST with only GPS)
+
+Same shape as multi-event: always an array of length 1.
 
 ```json
 {
@@ -252,7 +260,7 @@ GPS and host data are **not** nested in 1087.
 | `gps_ok` | Always |
 | `lat`, `lng` | Only when `gps_ok == true` |
 
-Virtual ids: suffix after last `-` of carrier `device_id` → `gps-{suffix}` / `node-gps-{suffix}`.
+Virtual ids: `{master}_GPS` / `node-{master}_GPS` from the provisioned carrier `device_id` (not OTA-writable).
 
 ### Schema 1088 — Host snapshot (bundled) — **updated 2026-09-03**
 
@@ -327,15 +335,16 @@ Do **not** expect `payload.key` / `payload.value` for new firmware.
 
 | Path | Purpose |
 |------|---------|
-| `components/telemetry_uplink/uplink_payload.c` | JSON builders |
-| `components/telemetry_uplink/include/uplink_schema_ids.h` | Schema ID numbers |
-| `components/telemetry_uplink/uplink_schema.c` | Host type → schema |
+| `firmware_v2/master/components/uplink/uplink_envelope.c` | Envelope + GPS payload |
+| `firmware_v2/master/components/uplink/uplink_obd.c` | OBD 1087 payload |
+| `firmware_v2/master/components/uplink/uplink_host.c` | Host 1088 payload |
+| `firmware_v2/master/components/uplink/uplink_batch.c` | Multi-envelope → one JSON array |
 | `docs/fleet-zigbee-host-guide.md` | Zigbee host onboarding |
 | `tools/carrier_console/` | PC provisioning UI |
 
 ---
 
-## Quick curl test (single object)
+## Quick curl test (array)
 
 ```bash
 curl -sS -X POST 'https://api.trafyn.info/nc-events-api/v2/messages' \

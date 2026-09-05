@@ -1,0 +1,16 @@
+menu "Fleet Zigbee"
+
+config FLEET_ZIGBEE_ENABLE
+    bool "Enable Zigbee coordinator transport"
+    default n
+    help
+        Master forms an open Zigbee network and receives host TLV frames.
+        When disabled, use transport_zigbee_ingest() for USB loopback tests.
+
+config FLEET_ZIGBEE_CHANNEL
+    int "Zigbee channel (11-26)"
+    depends on FLEET_ZIGBEE_ENABLE
+    range 11 26
+    default 15
+
+endmenu

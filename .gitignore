@@ -17,3 +17,7 @@ examples/**/sdkconfig
 build-host/
 .gitnexus
 tools/carrier_console/.venv/
+
+tests/host/build-*/
+firmware_v2/master/sdkconfig.bak
+tools/telemetry_mock/received.jsonl
