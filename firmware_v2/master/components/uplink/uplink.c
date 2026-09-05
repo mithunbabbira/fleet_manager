@@ -25,15 +25,17 @@
 static const char *TAG = "uplink";
 
 #ifndef CONFIG_UPLINK_URL
-#define CONFIG_UPLINK_URL UPLINK_URL_DEFAULT
+#error "CONFIG_UPLINK_URL missing — set it in firmware_v2/master/sdkconfig.defaults"
 #endif
+
 #ifndef CONFIG_UPLINK_TICK_SEC
 #define CONFIG_UPLINK_TICK_SEC 30
 #endif
 
 #define NVS_NS "uplink"
 #define NVS_KEY_NID "node_id"
-#define NVS_KEY_URL "url"
+/* Legacy lab override — erased on boot so CONFIG_UPLINK_URL from the bin wins. */
+#define NVS_KEY_URL_LEGACY "url"
 
 /* One tick's envelopes + POST body — kept off task stacks (caller holds s_mu). */
 static uplink_batch_t s_batch;
@@ -106,18 +108,18 @@ static esp_err_t post_json_body(const char *schema_tag, const char *body, size_t
     return err != ESP_OK ? err : ESP_FAIL;
 }
 
+/** @brief Load node_id from NVS; drop any legacy URL override so bin wins. */
 static void load_nvs(void)
 {
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
     size_t len = sizeof(s_node_id);
     (void)nvs_get_str(h, NVS_KEY_NID, s_node_id, &len);
-    len = sizeof(s_url);
-    char url[256];
-    if (nvs_get_str(h, NVS_KEY_URL, url, &len) == ESP_OK && url[0] != '\0') {
-        snprintf(s_url, sizeof(s_url), "%s", url);
+    if (nvs_erase_key(h, NVS_KEY_URL_LEGACY) == ESP_OK) {
+        (void)nvs_commit(h);
+        ESP_LOGI(TAG, "cleared legacy NVS uplink URL (using bin CONFIG_UPLINK_URL)");
     }
     nvs_close(h);
 }
@@ -130,21 +132,6 @@ static esp_err_t save_node_id(void)
         return err;
     }
     err = nvs_set_str(h, NVS_KEY_NID, s_node_id);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
-    }
-    nvs_close(h);
-    return err;
-}
-
-static esp_err_t save_url(void)
-{
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = nvs_set_str(h, NVS_KEY_URL, s_url);
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
@@ -511,19 +498,9 @@ esp_err_t uplink_get_node_id(char *out, size_t out_len)
 
 esp_err_t uplink_set_post_url(const char *url)
 {
-    if (url == NULL || url[0] == '\0' || s_mu == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (strlen(url) >= sizeof(s_url)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (xSemaphoreTake(s_mu, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    snprintf(s_url, sizeof(s_url), "%s", url);
-    esp_err_t err = save_url();
-    xSemaphoreGive(s_mu);
-    return err;
+    (void)url;
+    /* Fleet-wide URL is baked into the bin (CONFIG_UPLINK_URL). Change via OTA. */
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 esp_err_t uplink_once(void)

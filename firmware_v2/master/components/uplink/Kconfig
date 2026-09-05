@@ -1,8 +1,11 @@
 menu "Telemetry uplink (v2)"
 
     config UPLINK_URL
-        string "POST URL for telemetry events"
-        default "https://api.trafyn.info/nc-events-api/v2/messages"
+        string "POST URL for telemetry events (fleet-wide; from bin only)"
+        default ""
+        help
+            Set the real URL in firmware_v2/master/sdkconfig.defaults only
+            (CONFIG_UPLINK_URL). Do not duplicate here. Not stored in NVS.
 
     config UPLINK_TICK_SEC
         int "Uplink GPS tick interval (seconds)"

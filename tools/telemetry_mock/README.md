@@ -36,13 +36,21 @@ Expect `{"ok":true,"accepted":1}`. Events append to `received.jsonl`.
 ngrok http 8787
 ```
 
-On the device (no rebuild required):
+On the device (no rebuild required for identity):
 
 ```text
-uplink url https://YOUR-SUBDOMAIN.ngrok-free.app/nc-events-api/v2/messages
+device_id <id>
+node_id <id>
 ```
 
-Provision `device_id` / `node_id`, then `uplink once`.
+Telemetry POST URL is **from the firmware bin** — edit only  
+`firmware_v2/master/sdkconfig.defaults` (`CONFIG_UPLINK_URL` / `CONFIG_OTA_CLOUD_CHECK_URL`), then rebuild/OTA.  
+`uplink url` on the device is read-only.
+
+```text
+uplink url
+uplink once
+```
 
 When finished labbing, stop ngrok/mock and restore:
 

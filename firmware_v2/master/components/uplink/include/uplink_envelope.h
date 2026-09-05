@@ -10,7 +10,6 @@ extern "C" {
 
 #define UPLINK_SCHEMA_GPS "1089"
 #define UPLINK_SCHEMA_OBD "1087"
-#define UPLINK_URL_DEFAULT "https://api.trafyn.info/nc-events-api/v2/messages"
 #define UPLINK_GPS_ONLY_MIN_MOVE_M 50.0
 #define UPLINK_GPS_ONLY_HEARTBEAT_MS 300000ULL
 

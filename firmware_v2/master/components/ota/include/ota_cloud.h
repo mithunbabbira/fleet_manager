@@ -45,8 +45,8 @@ typedef struct {
 esp_err_t ota_cloud_init(void);
 esp_err_t ota_cloud_get_config(ota_cloud_config_t *out);
 /**
- * @brief Replace config, sanitize legacy lab URLs, persist (incl. uplink_did).
- * @note Does not refresh telemetry_uplink's in-RAM device_id.
+ * @brief Replace config (IDs/tokens); check URL always forced from bin Kconfig.
+ * @note Does not refresh telemetry uplink's in-RAM device_id.
  */
 esp_err_t ota_cloud_set_config(const ota_cloud_config_t *in);
 esp_err_t ota_cloud_get_status(ota_cloud_status_t *out);

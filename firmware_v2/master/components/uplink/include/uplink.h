@@ -35,7 +35,10 @@ esp_err_t uplink_get_status(uplink_status_t *out);
 esp_err_t uplink_set_node_id(const char *node_id);
 esp_err_t uplink_get_node_id(char *out, size_t out_len);
 
-/** Persist telemetry POST URL in NVS (overrides CONFIG_UPLINK_URL after reboot). */
+/**
+ * @brief Rejected: telemetry URL is CONFIG_UPLINK_URL from the bin (not NVS).
+ * @return Always ESP_ERR_NOT_SUPPORTED. Change URL by shipping a new firmware build.
+ */
 esp_err_t uplink_set_post_url(const char *url);
 
 /**

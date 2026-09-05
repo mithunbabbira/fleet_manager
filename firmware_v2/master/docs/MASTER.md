@@ -22,14 +22,18 @@
 - `device_id <id>` (OTA + uplink carrier id)
 - `node_id <id>` (required for OBD/GPS uplink POST)
 - `ota_token` / `ota_user` / `save` / `ota check`
-- `uplink status` / `uplink once` (one array of whatever is ready) / `uplink test` (synthetic 1089) / `uplink url [<url>]`
+- `uplink status` / `uplink once` (one array of whatever is ready) / `uplink test` (synthetic 1089) / `uplink url` (read-only, from bin)
 - `fleet hosts` / `fleet demo` (lab inject 1088 without Zigbee radio)
 
 `status` includes `can: mcp=` (chip) + `ready=` (ECU) and a short `obd:` line. `fleet hosts` lists registry snapshot. `sd status` shows mount + queue depth.
 
 ## Uplink
 
-- URL: `CONFIG_UPLINK_URL` factory default; override with `uplink url <url>` (NVS)
+- **Fleet URLs (edit one file):** `firmware_v2/master/sdkconfig.defaults`
+  - `CONFIG_OTA_CLOUD_CHECK_URL` — firmware check
+  - `CONFIG_UPLINK_URL` — telemetry POST  
+  Both are baked into the bin (not NVS). Change → rebuild → OTA.
+- Per-device: `device_id` / `node_id` / OTA token+user in **NVS** only.
 - **Core tick:** `produce_tick` collects OBD + Zigbee hosts + GPS via separate payload builders, then `uplink_batch_build_array` → **one** HTTPS POST
 - **Vehicle wrap:** `CONFIG_UPLINK_VEHICLE_WRAP=y` (default) → `{"Vehicle":[...]}` for Trafyn; `=n` for bare-array lab mock
 - Envelope: `device_id`, `node_id`, `schemaId`, `ts_ms`, `payload`

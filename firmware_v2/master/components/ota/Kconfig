@@ -5,8 +5,11 @@ menu "Cloud OTA (Trafyn get-latest)"
         default y
 
     config OTA_CLOUD_CHECK_URL
-        string "Firmware-check POST URL"
-        default "https://api.trafyn.info/workflow-engine/realm/1/user/1/v1/execution/service/runWithNoAuth/get-latest-device-firmware?refreshCache=true"
+        string "Firmware-check POST URL (fleet-wide; from bin only)"
+        default ""
+        help
+            Set the real URL in firmware_v2/master/sdkconfig.defaults only
+            (CONFIG_OTA_CLOUD_CHECK_URL). Do not duplicate here. Not stored in NVS.
 
     config OTA_CLOUD_AUTH_HEADER
         string "Optional Authorization header value (empty = omit)"

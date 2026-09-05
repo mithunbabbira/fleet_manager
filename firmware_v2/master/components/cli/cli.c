@@ -39,7 +39,7 @@ static void print_help(void)
         "  uplink status\n"
         "  uplink once\n"
         "  uplink test\n"
-        "  uplink url [<url>]\n"
+        "  uplink url\n"
         "  sd status\n");
 }
 
@@ -266,12 +266,13 @@ static void handle_line(char *line)
             printf("uplink url unavailable\n");
             return;
         }
-        printf("uplink url=%s\n", up.url[0] ? up.url : "(empty)");
+        printf("uplink url=%s (from bin)\n", up.url[0] ? up.url : "(empty)");
         return;
     }
     if (strncmp(line, "uplink url ", 11) == 0) {
-        esp_err_t err = uplink_set_post_url(line + 11);
-        printf("uplink url set (%s)\n", esp_err_to_name(err));
+        printf("uplink url is from firmware bin only — change via rebuild/OTA "
+               "(%s)\n",
+               esp_err_to_name(ESP_ERR_NOT_SUPPORTED));
         return;
     }
     if (strncmp(line, "node_id ", 8) == 0) {

@@ -95,44 +95,15 @@ static void set_phase(ota_cloud_phase_t p, const char *err)
     }
 }
 
-/** @brief Fill empty manifest_url from Kconfig CHECK_URL. */
+/** @brief Always set firmware-check URL from Kconfig (fleet-wide, bin only). */
 static void apply_default_url(ota_cloud_config_t *c)
 {
-    if (c->manifest_url[0] != '\0') {
-        return;
-    }
     const char *def = CONFIG_OTA_CLOUD_CHECK_URL;
     if (def && def[0]) {
         snprintf(c->manifest_url, sizeof(c->manifest_url), "%s", def);
+    } else {
+        c->manifest_url[0] = '\0';
     }
-}
-
-/** @brief Detect legacy ngrok / /firmware/manifest check URLs. */
-static bool check_url_is_legacy_lab(const char *url)
-{
-    if (url == NULL || url[0] == '\0') {
-        return false;
-    }
-    if (strstr(url, "ngrok") != NULL) {
-        return true;
-    }
-    if (strstr(url, "/firmware/manifest") != NULL) {
-        return true;
-    }
-    return false;
-}
-
-/** @brief Replace legacy URL with Kconfig default; return true if rewritten. */
-static bool sanitize_check_url(ota_cloud_config_t *c)
-{
-    if (!check_url_is_legacy_lab(c->manifest_url)) {
-        apply_default_url(c);
-        return false;
-    }
-    ESP_LOGW(TAG, "ignoring legacy lab check URL (ngrok/GET manifest)");
-    c->manifest_url[0] = '\0';
-    apply_default_url(c);
-    return true;
 }
 
 /** @brief Defaults; device_id starts as fleet-demo-001 (override via USB). */
@@ -142,7 +113,6 @@ static void defaults(ota_cloud_config_t *c)
     snprintf(c->channel, sizeof(c->channel), "%s", "stable");
     snprintf(c->device_id, sizeof(c->device_id), "%s", "fleet-demo-001");
     c->force = false;
-    c->manifest_url[0] = '\0';
     apply_default_url(c);
     if (CONFIG_OTA_CLOUD_AUTH_HEADER[0]) {
         snprintf(c->auth_token, sizeof(c->auth_token), "%s", CONFIG_OTA_CLOUD_AUTH_HEADER);
@@ -153,20 +123,19 @@ static void defaults(ota_cloud_config_t *c)
     }
 }
 
-/** @brief Load NVS into s_cfg/s_applied; may rewrite legacy URL. */
+/**
+ * @brief Load IDs/tokens from NVS; OTA check URL always from bin Kconfig.
+ * @note Erases legacy ota_manif URL key so old lab overrides cannot stick.
+ */
 static esp_err_t load_nvs(void)
 {
     defaults(&s_cfg);
-    s_cfg.manifest_url[0] = '\0';
     s_applied[0] = '\0';
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
-        apply_default_url(&s_cfg);
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
         return ESP_OK;
     }
-    size_t len = sizeof(s_cfg.manifest_url);
-    nvs_get_str(h, NVS_KEY_URL, s_cfg.manifest_url, &len);
-    len = sizeof(s_cfg.channel);
+    size_t len = sizeof(s_cfg.channel);
     nvs_get_str(h, NVS_KEY_CHAN, s_cfg.channel, &len);
     len = sizeof(s_cfg.device_id);
     nvs_get_str(h, NVS_KEY_DID, s_cfg.device_id, &len);
@@ -180,13 +149,14 @@ static esp_err_t load_nvs(void)
     if (nvs_get_u8(h, NVS_KEY_FORCE, &force) == ESP_OK) {
         s_cfg.force = force != 0;
     }
+    if (nvs_erase_key(h, NVS_KEY_URL) == ESP_OK) {
+        (void)nvs_commit(h);
+        ESP_LOGI(TAG, "cleared legacy NVS OTA check URL (using bin CONFIG_OTA_CLOUD_CHECK_URL)");
+    }
     nvs_close(h);
-    bool replaced = sanitize_check_url(&s_cfg);
+    apply_default_url(&s_cfg);
     if (s_cfg.channel[0] == '\0') {
         snprintf(s_cfg.channel, sizeof(s_cfg.channel), "%s", "stable");
-    }
-    if (replaced) {
-        (void)save_nvs(&s_cfg);
     }
     return ESP_OK;
 }
@@ -259,7 +229,7 @@ static esp_err_t clear_pending_version(void)
     return err;
 }
 
-/** @brief Persist URL/channel/force/device_id (uplink_did). */
+/** @brief Persist channel/force/device_id/tokens (not check URL — that is bin-only). */
 static esp_err_t save_nvs(const ota_cloud_config_t *c)
 {
     nvs_handle_t h;
@@ -267,10 +237,9 @@ static esp_err_t save_nvs(const ota_cloud_config_t *c)
     if (err != ESP_OK) {
         return err;
     }
-    err = nvs_set_str(h, NVS_KEY_URL, c->manifest_url);
-    if (err == ESP_OK) {
-        err = nvs_set_str(h, NVS_KEY_CHAN, c->channel);
-    }
+    /* Drop legacy URL key if present; never persist check URL. */
+    (void)nvs_erase_key(h, NVS_KEY_URL);
+    err = nvs_set_str(h, NVS_KEY_CHAN, c->channel);
     if (err == ESP_OK) {
         err = nvs_set_u8(h, NVS_KEY_FORCE, c->force ? 1 : 0);
     }
@@ -341,7 +310,8 @@ esp_err_t ota_cloud_set_config(const ota_cloud_config_t *in)
     if (s_cfg.channel[0] == '\0') {
         snprintf(s_cfg.channel, sizeof(s_cfg.channel), "%s", "stable");
     }
-    (void)sanitize_check_url(&s_cfg);
+    /* Ignore any caller-supplied check URL; fleet endpoint is from the bin. */
+    apply_default_url(&s_cfg);
     esp_err_t err = save_nvs(&s_cfg);
     xSemaphoreGive(s_mu);
     return err;
@@ -680,19 +650,16 @@ static void ensure_auto_config(void)
     if (ota_cloud_get_config(&cfg) != ESP_OK) {
         return;
     }
-    bool dirty = false;
-    if (cfg.manifest_url[0] == '\0') {
-        apply_default_url(&cfg);
-        dirty = cfg.manifest_url[0] != '\0';
-    }
-    /* Auto path never force-reflashes */
+    /* Check URL always from bin; auto path never force-reflashes. */
+    apply_default_url(&cfg);
     if (cfg.force) {
         cfg.force = false;
-        dirty = true;
-    }
-    if (dirty) {
         (void)ota_cloud_set_config(&cfg);
+        return;
     }
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    apply_default_url(&s_cfg);
+    xSemaphoreGive(s_mu);
 }
 
 /** @brief One auto cycle: start_background and wait until not busy. */
