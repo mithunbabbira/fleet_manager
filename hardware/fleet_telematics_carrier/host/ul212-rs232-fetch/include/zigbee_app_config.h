@@ -1,13 +1,18 @@
 #pragma once
 /*
  * Zigbee identity / RF — edit this file per board / truck, then rebuild.
- * Channel must match THAT truck's carrier (CONFIG_FLEET_ZIGBEE_CHANNEL).
- * Nearby trucks: use different channels so hosts cannot join the wrong parent.
+ * Truck isolation = same channel + same EPAN as that truck's carrier.
+ * Nearby trucks: use different channel and EPAN so hosts cannot join the wrong parent.
  * device_id must be unique per host for registry/cloud segregation.
  */
 
 #ifndef FLEET_ZB_CHANNEL
 #define FLEET_ZB_CHANNEL 15
+#endif
+
+/* 16 hex digits, MSB-first — must match CONFIG_FLEET_ZIGBEE_EPAN_ID on the carrier. */
+#ifndef FLEET_ZB_EPAN_ID
+#define FLEET_ZB_EPAN_ID "F1EE700000000001"
 #endif
 
 #ifndef ZB_DEVICE_ID

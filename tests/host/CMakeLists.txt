@@ -181,3 +181,12 @@ target_include_directories(test_uplink_batch_v2 PRIVATE
     ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/uplink/include
 )
 add_test(NAME test_uplink_batch_v2 COMMAND test_uplink_batch_v2)
+
+add_executable(test_fleet_zb_epan
+    test_fleet_zb_epan.c
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/transport_zigbee/fleet_zb_epan.c
+)
+target_include_directories(test_fleet_zb_epan PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/transport_zigbee/include
+)
+add_test(NAME test_fleet_zb_epan COMMAND test_fleet_zb_epan)

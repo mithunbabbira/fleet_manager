@@ -24,7 +24,8 @@ esp_err_t transport_zigbee_init(void)
         ESP_LOGE(TAG, "radio init failed: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "coordinator ready (open network, ch=%d)", CONFIG_FLEET_ZIGBEE_CHANNEL);
+    ESP_LOGI(TAG, "coordinator ready (open network, EPAN=%s ch=%d)", CONFIG_FLEET_ZIGBEE_EPAN_ID,
+             CONFIG_FLEET_ZIGBEE_CHANNEL);
 #else
     ESP_LOGI(TAG, "loopback mode — use transport_zigbee_ingest() for tests");
 #endif

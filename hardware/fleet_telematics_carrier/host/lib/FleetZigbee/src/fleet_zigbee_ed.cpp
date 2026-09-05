@@ -2,7 +2,7 @@
  * Zigbee end device on the UL212 host board.
  *
  * Flow:
- *   1. Join the coordinator's open network (channel FLEET_ZB_CHANNEL).
+ *   1. Join the coordinator's open network (channel FLEET_ZB_CHANNEL, EPAN FLEET_ZB_EPAN_ID).
  *   2. Send HELLO once connected (registers device_id with coordinator).
  *   3. Send REPORT every second with BLE sensor readings (TLV encoded).
  *   4. On disconnect (carrier reboot / RF loss), actively restart steering.
@@ -36,6 +36,7 @@ static uint64_t nowMs()
 #include "Zigbee.h"
 #include "bdb/esp_zigbee_bdb_commissioning.h"
 #include "esp_zigbee_core.h"
+#include "fleet_zb_epan.h"
 #include "fleet_zigbee_cluster.h"
 #include "zcl/esp_zigbee_zcl_command.h"
 
@@ -101,6 +102,14 @@ static void requestNetworkSteering(void)
     if (!esp_zb_lock_acquire(portMAX_DELAY)) {
         return;
     }
+    esp_zb_ieee_addr_t epan = {};
+    if (!fleet_zb_epan_parse(FLEET_ZB_EPAN_ID, epan)) {
+        esp_zb_lock_release();
+        Serial.printf("[zb] bad FLEET_ZB_EPAN_ID=%s\n", FLEET_ZB_EPAN_ID);
+        delay(1000);
+        ESP.restart();
+    }
+    esp_zb_set_extended_pan_id(epan);
     const esp_err_t err =
         esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
     esp_zb_lock_release();
@@ -118,12 +127,21 @@ static void radioStart()
     s_ep->setManufacturerAndModel("Fleet", "UL212Host");
     Zigbee.addEndpoint(s_ep);
     Zigbee.setPrimaryChannelMask(1UL << FLEET_ZB_CHANNEL);
+    esp_zb_ieee_addr_t epan = {};
+    if (!fleet_zb_epan_parse(FLEET_ZB_EPAN_ID, epan)) {
+        Serial.printf("[zb] bad FLEET_ZB_EPAN_ID=%s\n", FLEET_ZB_EPAN_ID);
+        delay(1000);
+        ESP.restart();
+    }
+    esp_zb_set_extended_pan_id(epan);
+    char epan_str[17];
+    fleet_zb_epan_format(epan, epan_str);
     if (!Zigbee.begin()) {
         Serial.println("[zb] begin failed, rebooting");
         delay(1000);
         ESP.restart();
     }
-    Serial.printf("[zb] joining coordinator (ch %d)…\n", FLEET_ZB_CHANNEL);
+    Serial.printf("[zb] joining coordinator (ch %d EPAN=%s)…\n", FLEET_ZB_CHANNEL, epan_str);
 }
 
 #endif /* FLEET_ZIGBEE_ED_RADIO */

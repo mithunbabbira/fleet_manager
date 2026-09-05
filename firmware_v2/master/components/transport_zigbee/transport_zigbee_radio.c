@@ -2,13 +2,14 @@
  * Zigbee coordinator on the fleet master (ESP-IDF).
  *
  * Flow:
- *   1. Form an open network on CONFIG_FLEET_ZIGBEE_CHANNEL.
+ *   1. Form an open network on CONFIG_FLEET_ZIGBEE_CHANNEL + CONFIG_FLEET_ZIGBEE_EPAN_ID.
  *   2. Keep permit-join open so hosts can (re)join after either side reboots.
  *   3. On custom-cluster RX → transport_zigbee_ingest() → host_registry.
  *
  * Security: open network only (lab / dev). No install codes.
  */
 
+#include "fleet_zb_epan.h"
 #include "fleet_zigbee_cluster.h"
 #include "transport_zigbee.h"
 
@@ -153,7 +154,11 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
     case ESP_ZB_BDB_SIGNAL_FORMATION:
         if (status == ESP_OK) {
-            ESP_LOGI(TAG, "network up PAN=0x%04x ch=%d", esp_zb_get_pan_id(),
+            esp_zb_ieee_addr_t cur = {0};
+            char epan_str[17];
+            esp_zb_get_extended_pan_id(cur);
+            fleet_zb_epan_format(cur, epan_str);
+            ESP_LOGI(TAG, "network up PAN=0x%04x EPAN=%s ch=%d", esp_zb_get_pan_id(), epan_str,
                      esp_zb_get_current_channel());
             esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             permit_join_open();
@@ -196,6 +201,20 @@ static void coordinator_task(void *arg)
     esp_zb_device_register(make_coordinator_endpoint());
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_primary_network_channel_set(1UL << CONFIG_FLEET_ZIGBEE_CHANNEL);
+
+    esp_zb_ieee_addr_t epan = {0};
+    if (!fleet_zb_epan_parse(CONFIG_FLEET_ZIGBEE_EPAN_ID, epan)) {
+        ESP_LOGE(TAG, "bad CONFIG_FLEET_ZIGBEE_EPAN_ID='%s'", CONFIG_FLEET_ZIGBEE_EPAN_ID);
+        vTaskDelete(NULL);
+        return;
+    }
+    esp_zb_set_extended_pan_id(epan);
+    {
+        char epan_str[17];
+        fleet_zb_epan_format(epan, epan_str);
+        ESP_LOGI(TAG, "EPAN=%s ch=%d (factory-new forms this network)", epan_str,
+                 CONFIG_FLEET_ZIGBEE_CHANNEL);
+    }
 
     ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_main_loop_iteration();

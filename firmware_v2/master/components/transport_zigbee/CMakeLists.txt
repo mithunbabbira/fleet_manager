@@ -6,7 +6,7 @@ if(CONFIG_FLEET_ZIGBEE_ENABLE)
     list(APPEND ZB_REQUIRES esp-zigbee-lib)
 endif()
 
-idf_component_register(SRCS "transport_zigbee.c" "transport_zigbee_radio.c"
+idf_component_register(SRCS "transport_zigbee.c" "transport_zigbee_radio.c" "fleet_zb_epan.c"
                     INCLUDE_DIRS "include"
                     PRIV_INCLUDE_DIRS "."
                     REQUIRES ${ZB_REQUIRES}

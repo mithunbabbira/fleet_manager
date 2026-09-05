@@ -9,3 +9,6 @@
 #ifndef FLEET_ZB_CHANNEL
 #define FLEET_ZB_CHANNEL              15  /* must match CONFIG_FLEET_ZIGBEE_CHANNEL on carrier */
 #endif
+#ifndef FLEET_ZB_EPAN_ID
+#define FLEET_ZB_EPAN_ID "F1EE700000000001"
+#endif

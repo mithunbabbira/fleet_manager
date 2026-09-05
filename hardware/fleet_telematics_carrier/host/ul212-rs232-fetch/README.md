@@ -39,21 +39,25 @@ Edit **only** `include/zigbee_app_config.h` per board / truck, then rebuild. No 
 
 ```c
 #define FLEET_ZB_CHANNEL  15              /* must match that truck's carrier */
+#define FLEET_ZB_EPAN_ID  "F1EE700000000001"  /* must match that truck's carrier */
 #define ZB_DEVICE_ID      "ul212-rs232-001"
 #define ZB_NODE_ID        "node-ul212-rs232-001"
 #define ZB_SCHEMA_ID      "1088"
 #define ZB_HOST_TYPE      "ul212_rs232_fetch"
 ```
 
-### Channel-per-truck
+### Channel + EPAN per truck
 
 | Concern | Rule |
 |---------|------|
-| Join the correct truck's carrier | Set **`FLEET_ZB_CHANNEL`** to the **same channel** as that truck's carrier (`CONFIG_FLEET_ZIGBEE_CHANNEL`). |
-| Nearby trucks | Use **different channels** on each truck so hosts cannot join the wrong parent. **Do not share a channel across trucks.** |
+| Join the correct truck's carrier | Set **`FLEET_ZB_CHANNEL`** and **`FLEET_ZB_EPAN_ID`** to the **same values** as that truck's carrier (`CONFIG_FLEET_ZIGBEE_CHANNEL` / `CONFIG_FLEET_ZIGBEE_EPAN_ID`). |
+| Nearby trucks | Use **different channel and EPAN** on each truck so hosts cannot join the wrong parent. **Do not share channel or EPAN across trucks.** |
 | Registry / cloud identity | Give each board a **unique `device_id`** (and matching `node_id`). |
+| After changing EPAN | **Erase flash once** on the host (`pio run -t erase`) so stale Zigbee NVS does not block join. |
 
-Example — truck 2: channel `20`, `ZB_DEVICE_ID` `"ul212-rs232-002"`, `ZB_NODE_ID` `"node-ul212-rs232-002"`.
+Lab default EPAN: **`F1EE700000000001`**. Full design: [`docs/superpowers/specs/2026-09-05-zigbee-epan-hardening-design.md`](../../../../docs/superpowers/specs/2026-09-05-zigbee-epan-hardening-design.md).
+
+Example — truck 2: channel `20`, EPAN `"F1EE700000000002"`, `ZB_DEVICE_ID` `"ul212-rs232-002"`, `ZB_NODE_ID` `"node-ul212-rs232-002"`.
 
 Carrier must have Zigbee enabled (`CONFIG_FLEET_ZIGBEE_ENABLE=y`) on the matching channel. After join, `fleet hosts` on the carrier USB serial should show your `device_id` with height and related readings.
 
@@ -116,8 +120,8 @@ Protocol **51** prints height with other fields zero; protocol **14** may also a
 1. **MAX232 loopback:** T1OUT ↔ R1IN shorted; bytes echo at 9600 (optional, no sensor).
 2. **Sensor wired; TankOffline** address **1**, protocol **14** or **51** matches the build define.
 3. **USB monitor** shows valid decoded lines (not repeated `(no frame)`).
-4. **`zigbee_app_config.h`:** channel matches carrier; unique `device_id` for this board.
-5. **Carrier:** same Zigbee channel; `fleet hosts` shows the host after join.
+4. **`zigbee_app_config.h`:** channel and EPAN match carrier; unique `device_id` for this board.
+5. **Carrier:** same Zigbee channel and EPAN; `fleet hosts` shows the host after join.
 
 ## Layout
 
