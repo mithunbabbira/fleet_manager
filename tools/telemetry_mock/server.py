@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Lab mock for fleet telemetry POST (array-only bare envelopes).
+Lab mock for fleet telemetry POST.
+
+Accepts either:
+  - bare array: [ {envelope}, ... ]
+  - Trafyn wrap: {"Vehicle":[ {envelope}, ... ]}
 
   POST /nc-events-api/v2/messages
   GET  /health
@@ -8,7 +12,7 @@ Lab mock for fleet telemetry POST (array-only bare envelopes).
 Usage:
   python3 tools/telemetry_mock/server.py
   ngrok http 8787
-  # Point CONFIG_UPLINK_URL at https://<ngrok>/nc-events-api/v2/messages
+  # Point device: uplink url https://<ngrok>/nc-events-api/v2/messages
 """
 
 from __future__ import annotations
@@ -45,9 +49,21 @@ def validate_envelope(obj: Any, index: int) -> str | None:
         return f"events[{index}].ts_ms must be a number"
     if not isinstance(obj["payload"], dict):
         return f"events[{index}].payload must be an object"
-    if "Vehicle" in obj:
-        return f"events[{index}] must be a bare envelope (no 'Vehicle' key)"
     return None
+
+
+def extract_events(body: Any) -> tuple[list[Any] | None, str | None, bool]:
+    """Return (events, error, vehicle_wrapped)."""
+    if isinstance(body, list):
+        return body, None, False
+    if isinstance(body, dict) and "Vehicle" in body:
+        vehicle = body["Vehicle"]
+        if isinstance(vehicle, list):
+            return vehicle, None, True
+        if isinstance(vehicle, dict):
+            return [vehicle], None, True
+        return None, "Vehicle must be an envelope object or array", True
+    return None, 'body must be a JSON array or {"Vehicle":[...]}', False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -83,43 +99,43 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error": f"invalid json: {e}"})
             return
 
-        if not isinstance(body, list):
-            self._send(
-                400,
-                {
-                    "ok": False,
-                    "error": "body must be a JSON array of envelopes (even for one event)",
-                },
-            )
+        events, err, vehicle_wrapped = extract_events(body)
+        if err:
+            self._send(400, {"ok": False, "error": err})
             return
-        if len(body) == 0:
+        assert events is not None
+        if len(events) == 0:
             self._send(400, {"ok": False, "error": "array must not be empty"})
             return
 
-        for i, ev in enumerate(body):
-            err = validate_envelope(ev, i)
-            if err:
-                self._send(400, {"ok": False, "error": err})
+        for i, ev in enumerate(events):
+            verr = validate_envelope(ev, i)
+            if verr:
+                self._send(400, {"ok": False, "error": verr})
                 return
 
         record = {
             "received_at": datetime.now(timezone.utc).isoformat(),
             "remote": self.client_address[0],
-            "count": len(body),
-            "events": body,
+            "vehicle_wrapped": vehicle_wrapped,
+            "count": len(events),
+            "events": events,
         }
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        print(f"accepted {len(body)} event(s):", flush=True)
-        for ev in body:
+        print(
+            f"accepted {len(events)} event(s) vehicle_wrap={vehicle_wrapped}:",
+            flush=True,
+        )
+        for ev in events:
             print(
                 f"  schemaId={ev['schemaId']} device_id={ev['device_id']} "
                 f"node_id={ev['node_id']} ts_ms={ev['ts_ms']}",
                 flush=True,
             )
 
-        self._send(200, {"ok": True, "accepted": len(body)})
+        self._send(200, {"ok": True, "accepted": len(events)})
 
 
 def main() -> None:

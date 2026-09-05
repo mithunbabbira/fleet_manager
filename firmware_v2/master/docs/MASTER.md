@@ -41,7 +41,9 @@
 ## Zigbee
 
 - `CONFIG_FLEET_ZIGBEE_ENABLE=y`, channel **15** — hosts must match
-- Open network; custom cluster 0xFC00; dynamic registry
+- **Open network** (permit-join, no install codes) — fine for lab; any nearby host on ch 15 can join
+- Custom cluster 0xFC00; dynamic registry
+- **Deferred (not implemented):** Zigbee install codes / TC-link key commissioning and unique EPAN per truck — see “hardening” note in project status; needed before multi-truck RF isolation beyond “different channel”
 
 ## Lab OTA test
 

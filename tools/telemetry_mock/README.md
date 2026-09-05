@@ -1,9 +1,13 @@
 # Telemetry mock API (lab)
 
-Replicates `POST /nc-events-api/v2/messages` for master uplink tests. Body contract matches production intent:
+Replicates `POST /nc-events-api/v2/messages` for master uplink tests.
 
-- **Always a JSON array** of bare envelopes (even one event).
-- No `Vehicle` wrapper.
+Accepted bodies (same as current firmware with `CONFIG_UPLINK_VEHICLE_WRAP=y`):
+
+- `{"Vehicle":[ {envelope}, ... ]}` — Trafyn-compatible wrap (preferred for device tests)
+- bare `[ {envelope}, ... ]` — also accepted
+
+Each envelope needs: `device_id`, `node_id`, `schemaId`, `ts_ms`, `payload`.
 
 ## Run
 
@@ -21,15 +25,7 @@ Health: `curl -s http://127.0.0.1:8787/health`
 ```bash
 curl -sS -X POST 'http://127.0.0.1:8787/nc-events-api/v2/messages' \
   -H 'Content-Type: application/json' \
-  -d '[
-    {
-      "device_id": "fleet-demo-001_GPS",
-      "node_id": "node-fleet-demo-001_GPS",
-      "schemaId": "1089",
-      "ts_ms": 1710000001000,
-      "payload": { "gps_ok": true, "lat": 12.97, "lng": 77.59 }
-    }
-  ]'
+  -d '{"Vehicle":[{"device_id":"fleet-demo-001_GPS","node_id":"node-fleet-demo-001_GPS","schemaId":"1089","ts_ms":1710000001000,"payload":{"gps_ok":true,"lat":12.97,"lng":77.59}}]}'
 ```
 
 Expect `{"ok":true,"accepted":1}`. Events append to `received.jsonl`.
@@ -40,23 +36,23 @@ Expect `{"ok":true,"accepted":1}`. Events append to `received.jsonl`.
 ngrok http 8787
 ```
 
-Set the master URL to the **full** path (rebuild or sdkconfig):
+On the device (no rebuild required):
 
-```
-CONFIG_UPLINK_URL="https://YOUR-SUBDOMAIN.ngrok-free.app/nc-events-api/v2/messages"
+```text
+uplink url https://YOUR-SUBDOMAIN.ngrok-free.app/nc-events-api/v2/messages
 ```
 
-On device: provision `device_id` / `node_id`, then `uplink once`.
+Provision `device_id` / `node_id`, then `uplink once`.
+
+When finished labbing, stop ngrok/mock and restore:
+
+```text
+uplink url https://api.trafyn.info/nc-events-api/v2/messages
+```
 
 ## Swap to production later
 
-Change only `CONFIG_UPLINK_URL` to Trafyn:
-
-```
-https://api.trafyn.info/nc-events-api/v2/messages
-```
-
-Path and body shape stay the same (assuming Trafyn accepts array-of-envelopes).
+Same CLI URL change. Path and envelope fields stay the same; Trafyn must accept the Vehicle-wrapped array (backend schema-registry must be healthy).
 
 ## Spec
 
