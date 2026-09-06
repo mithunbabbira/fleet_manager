@@ -103,7 +103,8 @@ static int json_escape_str(char *out, size_t out_len, size_t *off, const char *s
 }
 
 int uplink_build_envelope(const char *device_id, const char *node_id, const char *schema_id,
-                          uint64_t ts_ms, const char *payload_json, char *out, size_t out_len)
+                          const char *device_type, uint64_t ts_ms, const char *payload_json,
+                          char *out, size_t out_len)
 {
     if (device_id == NULL || device_id[0] == '\0' || node_id == NULL || node_id[0] == '\0' ||
         schema_id == NULL || schema_id[0] == '\0' || payload_json == NULL || out == NULL ||
@@ -131,6 +132,12 @@ int uplink_build_envelope(const char *device_id, const char *node_id, const char
     PUT(",\"node_id\":");
     if (json_escape_str(out, out_len, &off, node_id) != 0) {
         return -1;
+    }
+    if (device_type != NULL && device_type[0] != '\0') {
+        PUT(",\"device_type\":");
+        if (json_escape_str(out, out_len, &off, device_type) != 0) {
+            return -1;
+        }
     }
     PUT(",\"schemaId\":");
     if (json_escape_str(out, out_len, &off, schema_id) != 0) {

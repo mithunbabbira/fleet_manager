@@ -23,6 +23,9 @@ static const char *TAG = "lte";
 /* Modem can take several seconds to boot; retry AT for up to this long. */
 #define LTE_AT_ATTEMPTS   60
 #define LTE_AT_INTERVAL_MS 500
+/* After this many consecutive HTTP transport fails → RF cycle (CFUN 0→1). */
+#define LTE_HTTP_FAIL_STREAK_CFUN 5
+#define LTE_CFUN_COOLDOWN_MS (15LL * 60LL * 1000LL)
 
 static lte_status_t s_status;
 static bool s_uart_ready;
@@ -30,6 +33,8 @@ static SemaphoreHandle_t s_uart_mutex;
 /* When true, gps_task skips AT so OTA QHTTP streams own the UART cleanly. */
 static volatile bool s_suspend_bg_at;
 static TaskHandle_t s_bringup_task;
+static uint32_t s_http_transport_fails;
+static int64_t s_last_cfun_recover_ms;
 
 /* Wall-clock cache: UTC epoch ms at sync + monotonic anchor for extrapolation. */
 static SemaphoreHandle_t s_time_mutex;
@@ -362,6 +367,9 @@ static void bringup_task(void *arg)
     }
 
     s_status.uart_ok = true;
+
+    /* Clear any stuck QHTTP session left from before last ESP reset. */
+    (void)at_transact("AT+QHTTPSTOP", resp, sizeof(resp), 5000);
 
 #if CONFIG_LTE_GPS_ENABLE
     gps_task_start();
@@ -1019,9 +1027,83 @@ static esp_err_t ensure_pdp_locked(char *resp, size_t resp_len)
 }
 
 /**
- * @brief QHTTPURL length handshake: wait CONNECT, write URL, wait OK.
+ * @brief Force PDP down/up even when QIACT? still shows an IP (zombie context).
  */
-static esp_err_t http_set_url_locked(const char *url, char *resp, size_t resp_len)
+static void pdp_force_recycle_locked(char *resp, size_t resp_len)
+{
+    ESP_LOGW(TAG, "PDP force recycle (QIDEACT+QIACT)");
+    s_status.ip_up = false;
+    s_status.link_up = false;
+    s_status.ip[0] = '\0';
+    at_transact_locked("AT+QIDEACT=1", resp, resp_len, 15000);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "AT+QICSGP=1,1,\"%s\",\"\",\"\",0", CONFIG_LTE_APN);
+    at_transact_locked(cmd, resp, resp_len, 3000);
+    at_transact_locked("AT+QIACT=1", resp, resp_len, 30000);
+    (void)pdp_parse_ip_locked(resp, resp_len);
+}
+
+/**
+ * @brief End any prior QHTTP session. Idle modem may return ERROR — ignore.
+ *
+ * Without this, a stuck session makes the next AT+QHTTPURL return ERROR
+ * immediately (~200ms), which surfaces as "QHTTPURL fail" on uplink/OTA.
+ */
+static void http_qhttp_stop_locked(char *resp, size_t resp_len)
+{
+    (void)at_transact_locked("AT+QHTTPSTOP", resp, resp_len, 5000);
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+/**
+ * @brief Soft RF cycle when QHTTP/PDP stay broken after lighter recovery.
+ * @note Cooldown prevents CFUN thrash on every uplink tick.
+ */
+static void modem_cfun_recover_locked(char *resp, size_t resp_len)
+{
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (s_last_cfun_recover_ms > 0 &&
+        (now_ms - s_last_cfun_recover_ms) < LTE_CFUN_COOLDOWN_MS) {
+        ESP_LOGW(TAG, "CFUN recover skipped (cooldown)");
+        return;
+    }
+    s_last_cfun_recover_ms = now_ms;
+    ESP_LOGW(TAG, "modem CFUN recover (RF cycle) after %u HTTP fails",
+             (unsigned)s_http_transport_fails);
+    http_qhttp_stop_locked(resp, resp_len);
+    at_transact_locked("AT+CFUN=0", resp, resp_len, 15000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    at_transact_locked("AT+CFUN=1", resp, resp_len, 15000);
+    for (int i = 0; i < 40; ++i) {
+        if (at_transact_locked("AT", resp, resp_len, 1000) == ESP_OK &&
+            strstr(resp, "OK") != NULL) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    pdp_force_recycle_locked(resp, resp_len);
+    http_qhttp_stop_locked(resp, resp_len);
+}
+
+static void http_note_transport_ok(void)
+{
+    s_http_transport_fails = 0;
+}
+
+static void http_note_transport_fail(char *resp, size_t resp_len)
+{
+    s_http_transport_fails++;
+    if (s_http_transport_fails >= LTE_HTTP_FAIL_STREAK_CFUN) {
+        modem_cfun_recover_locked(resp, resp_len);
+        s_http_transport_fails = 0;
+    }
+}
+
+/**
+ * @brief One QHTTPURL length handshake: wait CONNECT, write URL, wait OK.
+ */
+static esp_err_t http_set_url_once_locked(const char *url, char *resp, size_t resp_len)
 {
     size_t url_len = strlen(url);
     char cmd[48];
@@ -1044,6 +1126,36 @@ static esp_err_t http_set_url_locked(const char *url, char *resp, size_t resp_le
         return ESP_FAIL;
     }
     return at_wait_token_locked(resp, resp_len, 80000, "OK");
+}
+
+/**
+ * @brief QHTTPURL with escalating auto-recover (no driver action required).
+ *
+ * Ladder: QHTTPSTOP → set URL → stop+retry → PDP recycle+retry.
+ * Callers also bump a fail streak that may trigger CFUN RF cycle.
+ */
+static esp_err_t http_set_url_locked(const char *url, char *resp, size_t resp_len)
+{
+    http_qhttp_stop_locked(resp, resp_len);
+    esp_err_t rc = http_set_url_once_locked(url, resp, resp_len);
+    if (rc == ESP_OK) {
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "QHTTPURL fail (will stop+retry) resp='%s'", resp ? resp : "");
+    http_qhttp_stop_locked(resp, resp_len);
+    rc = http_set_url_once_locked(url, resp, resp_len);
+    if (rc == ESP_OK) {
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "QHTTPURL retry fail — PDP recycle then one more try resp='%s'",
+             resp ? resp : "");
+    pdp_force_recycle_locked(resp, resp_len);
+    http_qhttp_stop_locked(resp, resp_len);
+    rc = http_set_url_once_locked(url, resp, resp_len);
+    if (rc != ESP_OK) {
+        ESP_LOGW(TAG, "QHTTPURL after PDP recycle fail resp='%s'", resp ? resp : "");
+    }
+    return rc;
 }
 
 esp_err_t lte_http_post(const char *url, const char *body, lte_http_result_t *out)
@@ -1077,6 +1189,7 @@ static esp_err_t http_prepare_get_locked(const char *url, char *resp, size_t res
     at_transact_locked("AT+QHTTPCFG=\"responseheader\",0", resp, resp_len, 3000);
 
     if (http_set_url_locked(url, resp, resp_len) != ESP_OK) {
+        http_note_transport_fail(resp, resp_len);
         return ESP_FAIL;
     }
 
@@ -1343,6 +1456,7 @@ esp_err_t lte_http_post_recv(const char *url, const char *body,
         if (out) {
             snprintf(out->error, sizeof(out->error), "PDP/IP fail");
         }
+        http_note_transport_fail(resp, sizeof(resp));
         goto done;
     }
 
@@ -1366,6 +1480,7 @@ esp_err_t lte_http_post_recv(const char *url, const char *body,
         if (out) {
             snprintf(out->error, sizeof(out->error), "QHTTPURL fail");
         }
+        http_note_transport_fail(resp, sizeof(resp));
         goto done;
     }
 
@@ -1563,6 +1678,16 @@ esp_err_t lte_http_post_recv(const char *url, const char *body,
 
 done:
     free(payload);
+    if (rc == ESP_OK) {
+        http_note_transport_ok();
+    } else if (out && out->error[0] &&
+               (strstr(out->error, "QHTTPURL") || strstr(out->error, "PDP") ||
+                strstr(out->error, "QHTTPPOST") || strstr(out->error, "no QHTTP"))) {
+        /* Streak already bumped on QHTTPURL/PDP; bump other transport dies here. */
+        if (!strstr(out->error, "QHTTPURL") && !strstr(out->error, "PDP")) {
+            http_note_transport_fail(resp, sizeof(resp));
+        }
+    }
     xSemaphoreGive(s_uart_mutex);
     ESP_LOGI(TAG, "http_post_recv rc=%s status=%d len=%u", esp_err_to_name(rc),
              out ? out->http_status : -1, (unsigned)(resp_len ? *resp_len : 0));

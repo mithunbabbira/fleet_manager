@@ -18,7 +18,7 @@ static const char *TAG = "main";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "firmware_v2 master boot (M6 SD store-on-fail)");
+    ESP_LOGI(TAG, "firmware_v2 master boot (nc-fleet-device; device_type obd/gps 1.0.32)");
     ESP_LOGI(TAG, "LTE pins TX=%d RX=%d (PCB frozen)", BOARD_LTE_TX_GPIO, BOARD_LTE_RX_GPIO);
     ESP_LOGI(TAG, "MCP soft-SPI SCK=%d MOSI=%d MISO=%d CS=%d INT=%d", BOARD_MCP_SCK_GPIO,
              BOARD_MCP_MOSI_GPIO, BOARD_MCP_MISO_GPIO, BOARD_MCP_CS_GPIO, BOARD_MCP_INT_GPIO);

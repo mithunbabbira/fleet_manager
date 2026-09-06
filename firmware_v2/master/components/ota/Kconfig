@@ -33,10 +33,12 @@ menu "Cloud OTA (Trafyn get-latest)"
         default 90
         depends on OTA_CLOUD_AUTO_CHECK
 
-    config OTA_CLOUD_AUTO_INTERVAL_H
-        int "Hours between auto OTA checks"
-        range 1 168
-        default 4
+    config OTA_CLOUD_AUTO_INTERVAL_MIN
+        int "Minutes between auto OTA checks"
+        range 5 10080
+        default 30
         depends on OTA_CLOUD_AUTO_CHECK
+        help
+            Lab-friendly default is 30 minutes. Production fleets may use 240 (4h).
 
 endmenu

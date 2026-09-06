@@ -27,11 +27,13 @@ int uplink_build_gps_payload(bool gps_ok, double lat, double lng, char *out, siz
 
 /**
  * Build one envelope JSON object.
+ * @param device_type optional; NULL or "" omits the field (Zigbee/fuel hosts).
  * payload_json must be a JSON object (no surrounding array).
  * Returns bytes written or -1.
  */
 int uplink_build_envelope(const char *device_id, const char *node_id, const char *schema_id,
-                          uint64_t ts_ms, const char *payload_json, char *out, size_t out_len);
+                          const char *device_type, uint64_t ts_ms, const char *payload_json,
+                          char *out, size_t out_len);
 
 #ifdef __cplusplus
 }

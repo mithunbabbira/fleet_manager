@@ -44,7 +44,15 @@ static char s_post_body[UPLINK_BATCH_MAX_EVENTS * UPLINK_BATCH_ENV_MAX + 32];
 static char s_wrap_body[16384];
 
 #ifndef CONFIG_UPLINK_VEHICLE_WRAP
-#define CONFIG_UPLINK_VEHICLE_WRAP 1
+/* When Kconfig disables the bool, the symbol is undefined — default OFF for
+ * nc-fleet-device (bare array). Do not default to 1 or wrap stays forced on. */
+#define CONFIG_UPLINK_VEHICLE_WRAP 0
+#endif
+#ifndef CONFIG_UPLINK_DEVICE_TYPE_OBD
+#define CONFIG_UPLINK_DEVICE_TYPE_OBD "obd"
+#endif
+#ifndef CONFIG_UPLINK_DEVICE_TYPE_GPS
+#define CONFIG_UPLINK_DEVICE_TYPE_GPS "gps"
 #endif
 
 static SemaphoreHandle_t s_mu;
@@ -81,7 +89,7 @@ static void enqueue_failed_envelope(const char *envelope_json)
 static esp_err_t post_json_body(const char *schema_tag, const char *body, size_t body_len)
 {
 #if CONFIG_UPLINK_VEHICLE_WRAP
-    /* Trafyn requires top-level "Vehicle"; wrap the envelope array. */
+    /* Legacy Trafyn nc-events-api shape. */
     int wn = snprintf(s_wrap_body, sizeof(s_wrap_body), "{\"Vehicle\":%s}", body);
     if (wn < 0 || (size_t)wn >= sizeof(s_wrap_body)) {
         return ESP_ERR_NO_MEM;
@@ -240,8 +248,9 @@ static void collect_obd(uplink_batch_t *batch)
     if (ts == 0) {
         ts = now_ms();
     }
-    if (uplink_build_envelope(ocfg.device_id, s_node_id, UPLINK_SCHEMA_OBD, ts, payload, env,
-                              sizeof(env)) < 0) {
+
+    if (uplink_build_envelope(ocfg.device_id, s_node_id, UPLINK_SCHEMA_OBD, CONFIG_UPLINK_DEVICE_TYPE_OBD,
+                              ts, payload, env, sizeof(env)) < 0) {
         return;
     }
     (void)uplink_batch_add(batch, env);
@@ -298,7 +307,7 @@ static void collect_hosts(uplink_batch_t *batch)
         }
         const char *schema =
             report.schema_id[0] ? report.schema_id : UPLINK_SCHEMA_HOST;
-        if (uplink_build_envelope(report.device_id, report.node_id, schema, ts, payload, env,
+        if (uplink_build_envelope(report.device_id, report.node_id, schema, NULL, ts, payload, env,
                                   sizeof(env)) < 0) {
             continue;
         }
@@ -352,8 +361,8 @@ static void collect_gps(uplink_batch_t *batch, bool force)
         return;
     }
     uplink_virtual_gps_ids(ocfg.device_id, gps_did, sizeof(gps_did), gps_nid, sizeof(gps_nid));
-    if (uplink_build_envelope(gps_did, gps_nid, UPLINK_SCHEMA_GPS, ts, payload, env,
-                              sizeof(env)) < 0) {
+    if (uplink_build_envelope(gps_did, gps_nid, UPLINK_SCHEMA_GPS, CONFIG_UPLINK_DEVICE_TYPE_GPS, ts,
+                              payload, env, sizeof(env)) < 0) {
         return;
     }
     if (uplink_batch_add(batch, env) == 0) {
@@ -550,8 +559,8 @@ esp_err_t uplink_lab_post(void)
     if (ts == 0) {
         ts = now_ms();
     }
-    if (uplink_build_envelope(gps_did, gps_nid, UPLINK_SCHEMA_GPS, ts, payload, env,
-                              sizeof(env)) < 0) {
+    if (uplink_build_envelope(gps_did, gps_nid, UPLINK_SCHEMA_GPS, CONFIG_UPLINK_DEVICE_TYPE_GPS, ts,
+                              payload, env, sizeof(env)) < 0) {
         err = ESP_ERR_NO_MEM;
         goto out;
     }

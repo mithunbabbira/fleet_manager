@@ -71,8 +71,12 @@ static const char *TAG = "ota_cloud";
 #ifndef CONFIG_OTA_CLOUD_AUTO_WAIT_SEC
 #define CONFIG_OTA_CLOUD_AUTO_WAIT_SEC 90
 #endif
-#ifndef CONFIG_OTA_CLOUD_AUTO_INTERVAL_H
-#define CONFIG_OTA_CLOUD_AUTO_INTERVAL_H 24
+#ifndef CONFIG_OTA_CLOUD_AUTO_INTERVAL_MIN
+#ifdef CONFIG_OTA_CLOUD_AUTO_INTERVAL_H
+#define CONFIG_OTA_CLOUD_AUTO_INTERVAL_MIN (CONFIG_OTA_CLOUD_AUTO_INTERVAL_H * 60)
+#else
+#define CONFIG_OTA_CLOUD_AUTO_INTERVAL_MIN 30
+#endif
 #endif
 
 static SemaphoreHandle_t s_mu;
@@ -696,14 +700,16 @@ static void lte_ota_auto_task(void *arg)
 {
     (void)arg;
     const int wait_sec = CONFIG_OTA_CLOUD_AUTO_WAIT_SEC;
-    const int interval_h = CONFIG_OTA_CLOUD_AUTO_INTERVAL_H;
-    ESP_LOGI(TAG, "auto: task started (wait=%ds interval=%dh)", wait_sec, interval_h);
+    const int interval_min = CONFIG_OTA_CLOUD_AUTO_INTERVAL_MIN > 0
+                                 ? CONFIG_OTA_CLOUD_AUTO_INTERVAL_MIN
+                                 : 30;
+    ESP_LOGI(TAG, "auto: task started (wait=%ds interval=%dmin)", wait_sec, interval_min);
 
     for (;;) {
         wait_lte_registered(wait_sec);
         auto_check_once();
-        ESP_LOGI(TAG, "auto: next check in %d hour(s)", interval_h);
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)interval_h * 3600U * 1000U));
+        ESP_LOGI(TAG, "auto: next check in %d minute(s)", interval_min);
+        vTaskDelay(pdMS_TO_TICKS((uint32_t)interval_min * 60U * 1000U));
     }
 }
 

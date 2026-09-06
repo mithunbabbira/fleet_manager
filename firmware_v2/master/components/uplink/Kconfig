@@ -14,9 +14,19 @@ menu "Telemetry uplink (v2)"
 
     config UPLINK_VEHICLE_WRAP
         bool "Wrap POST body as {\"Vehicle\":[...envelopes...]}"
-        default y
+        default n
         help
-            Trafyn nc-events-api currently requires a top-level Vehicle key.
-            Disable for lab mocks that accept a bare JSON array of envelopes.
+            Off for Trafyn /v1/sources/nc-fleet-device/messages (bare JSON array).
+            Enable only if a backend still requires a top-level Vehicle key.
+
+    config UPLINK_DEVICE_TYPE_OBD
+        string "device_type field for OBD (1087) envelopes"
+        default "obd"
+
+    config UPLINK_DEVICE_TYPE_GPS
+        string "device_type field for GPS (1089) envelopes"
+        default "gps"
+        help
+            Zigbee/host (fuel) envelopes omit device_type; backend keys those by device_id.
 
 endmenu

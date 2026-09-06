@@ -18,14 +18,18 @@ int main(void)
     assert(strstr(payload, "lat") != NULL);
 
     char env[512];
-    assert(uplink_build_envelope(did, nid, UPLINK_SCHEMA_GPS, 1710000001000ULL, payload, env,
+    assert(uplink_build_envelope(did, nid, UPLINK_SCHEMA_GPS, "gps", 1710000001000ULL, payload, env,
                                  sizeof(env)) > 0);
     assert(strstr(env, "\"schemaId\":\"1089\"") != NULL);
+    assert(strstr(env, "\"device_type\":\"gps\"") != NULL);
     assert(strstr(env, "\"device_id\":\"fleet-demo-001_GPS\"") != NULL);
     assert(strstr(env, "\"payload\":{") != NULL);
 
-    assert(uplink_build_envelope("", "n", "1089", 1, "{}", env, sizeof(env)) < 0);
-    assert(uplink_build_envelope("d", "", "1089", 1, "{}", env, sizeof(env)) < 0);
+    assert(uplink_build_envelope("host-1", "node-h", "1088", NULL, 1, "{}", env, sizeof(env)) > 0);
+    assert(strstr(env, "device_type") == NULL);
+
+    assert(uplink_build_envelope("", "n", "1089", "gps", 1, "{}", env, sizeof(env)) < 0);
+    assert(uplink_build_envelope("d", "", "1089", "gps", 1, "{}", env, sizeof(env)) < 0);
 
     assert(uplink_gps_worth_sending(false, 0, 0, 0, 1, 1, 1000));
     assert(!uplink_gps_worth_sending(true, 12.0, 77.0, 1000, 12.0001, 77.0001, 2000));
