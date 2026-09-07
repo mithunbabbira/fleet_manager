@@ -16,7 +16,7 @@ menu "Telemetry uplink (v2)"
         bool "Wrap POST body as {\"Vehicle\":[...envelopes...]}"
         default n
         help
-            Off for Trafyn /v1/sources/nc-fleet-device/messages (bare JSON array).
+            Off for Trafyn /nc-events-api/v1/sources/nc-fleet-device/messages (bare JSON array).
             Enable only if a backend still requires a top-level Vehicle key.
 
     config UPLINK_DEVICE_TYPE_OBD
@@ -27,6 +27,8 @@ menu "Telemetry uplink (v2)"
         string "device_type field for GPS (1089) envelopes"
         default "gps"
         help
-            Zigbee/host (fuel) envelopes omit device_type; backend keys those by device_id.
+            Master-owned streams only. Zigbee hosts are dynamic (fuel or any
+            new type); their envelopes omit device_type and carry host_type
+            in payload — backend keys them by device_id.
 
 endmenu

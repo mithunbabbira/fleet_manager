@@ -4,14 +4,14 @@ Lab mock matching Trafyn fleet uplink (nc-fleet-device).
 
 Mirrors production contract used by firmware_v2 master:
 
-  POST /v1/sources/nc-fleet-device/messages
+  POST /nc-events-api/v1/sources/nc-fleet-device/messages
   Content-Type: application/json
   Body: bare JSON array of envelopes (NOT {"Vehicle":[...]}).
 
   Envelope:
     device_id, node_id, ts_ms, payload   — required
-    device_type                          — required "obd"|"gps" for those kinds;
-                                           omit for Zigbee/fuel hosts
+    device_type                          — required "obd"|"gps" for master-owned streams;
+                                           omit for Zigbee/dynamic hosts (payload.host_type)
     schemaId                             — optional (firmware still sends 1087/1088/1089)
 
   GET  /health
@@ -21,7 +21,7 @@ Mirrors production contract used by firmware_v2 master:
 Usage:
   python3 tools/telemetry_mock/server.py
   # Optional tunnel: ngrok http 8787
-  # Lab only: point CONFIG_UPLINK_URL at the tunnel + /v1/sources/nc-fleet-device/messages
+  # Lab only: point CONFIG_UPLINK_URL at the tunnel + /nc-events-api/v1/sources/nc-fleet-device/messages
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ from urllib.parse import parse_qs, urlparse
 HOST = "0.0.0.0"
 PORT = 8787
 # Same path as production Trafyn uplink.
-PATH = "/v1/sources/nc-fleet-device/messages"
-LEGACY_PATH = "/nc-events-api/v2/messages"
+PATH = "/nc-events-api/v1/sources/nc-fleet-device/messages"
+LEGACY_PATH = "/v1/sources/nc-fleet-device/messages"
 LOG_PATH = Path(__file__).resolve().parent / "received.jsonl"
 MAX_RECENT = 200
 
@@ -185,8 +185,8 @@ MONITOR_HTML = """<!DOCTYPE html>
 </head>
 <body>
   <h1>Fleet telemetry mock</h1>
-  <div class="meta">Mirrors Trafyn <code>POST /v1/sources/nc-fleet-device/messages</code>
-    (bare array · device_type obd/gps · fuel omits type) · auto-refresh 2s ·
+  <div class="meta">Mirrors Trafyn <code>POST /nc-events-api/v1/sources/nc-fleet-device/messages</code>
+    (bare array · device_type obd/gps · Zigbee hosts omit type) · auto-refresh 2s ·
     JSON: <a href="/events?n=20&amp;format=json">/events?format=json</a> ·
     <a href="/health">/health</a></div>
   <div class="stats">

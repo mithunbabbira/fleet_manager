@@ -27,7 +27,8 @@ int uplink_build_gps_payload(bool gps_ok, double lat, double lng, char *out, siz
 
 /**
  * Build one envelope JSON object.
- * @param device_type optional; NULL or "" omits the field (Zigbee/fuel hosts).
+ * @param device_type optional; NULL or "" omits the field (Zigbee/dynamic hosts).
+ *                    Master sets "obd" / "gps" for streams it owns.
  * payload_json must be a JSON object (no surrounding array).
  * Returns bytes written or -1.
  */

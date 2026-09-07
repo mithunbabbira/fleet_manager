@@ -17,7 +17,7 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 #
 CONFIG_OTA_CLOUD_CHECK_URL="https://api.trafyn.info/workflow-engine/realm/1/user/1/v1/execution/service/runWithNoAuth/get-latest-device-firmware?refreshCache=true"
 # Trafyn fleet uplink (bare JSON array; no Vehicle wrap)
-CONFIG_UPLINK_URL="https://api.trafyn.info/v1/sources/nc-fleet-device/messages"
+CONFIG_UPLINK_URL="https://api.trafyn.info/nc-events-api/v1/sources/nc-fleet-device/messages"
 # CONFIG_UPLINK_VEHICLE_WRAP is not set
 CONFIG_UPLINK_DEVICE_TYPE_OBD="obd"
 CONFIG_UPLINK_DEVICE_TYPE_GPS="gps"

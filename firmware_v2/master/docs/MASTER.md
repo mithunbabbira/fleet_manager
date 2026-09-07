@@ -31,16 +31,16 @@
 
 - **Fleet URLs (edit one file):** `firmware_v2/master/sdkconfig.defaults`
   - `CONFIG_OTA_CLOUD_CHECK_URL` — firmware check
-  - `CONFIG_UPLINK_URL` — telemetry POST (`…/v1/sources/nc-fleet-device/messages`)
+  - `CONFIG_UPLINK_URL` — telemetry POST (`…/nc-events-api/v1/sources/nc-fleet-device/messages`)
   Both are baked into the bin (not NVS). Change → rebuild → OTA.
 - Per-device: `device_id` / `node_id` / OTA token+user in **NVS** only.
 - **Core tick:** `produce_tick` collects OBD + Zigbee hosts + GPS via separate payload builders, then `uplink_batch_build_array` → **one** HTTPS POST
-- **Vehicle wrap:** `CONFIG_UPLINK_VEHICLE_WRAP` default **off** → bare JSON array for `/v1/sources/nc-fleet-device/messages`; `=y` only for legacy `{"Vehicle":[...]}`
+- **Vehicle wrap:** `CONFIG_UPLINK_VEHICLE_WRAP` default **off** → bare JSON array for `/nc-events-api/v1/sources/nc-fleet-device/messages`; `=y` only for legacy `{"Vehicle":[...]}`
 - Envelope: `device_id`, `node_id`, optional `device_type` (`obd`/`gps` from config), `schemaId`, `ts_ms`, `payload`
-- **device_type:** `CONFIG_UPLINK_DEVICE_TYPE_OBD` / `CONFIG_UPLINK_DEVICE_TYPE_GPS` (Zigbee/fuel omits it)
+- **device_type:** master sets `CONFIG_UPLINK_DEVICE_TYPE_OBD` / `GPS` only; Zigbee/dynamic hosts **omit** it (identity via `device_id` + `payload.host_type`)
 - **1089 GPS:** virtual ids `{master}_GPS` / `node-{master}_GPS`; move/heartbeat gates (bypassed by `uplink once`)
 - **1087 OBD:** carrier `device_id` / `node_id`; included when ≥1 fresh PID (≤15 s) — needs ECU
-- **1088 host:** host-owned ids from HELLO/REPORT; flat METRIC_MAP keys; one array element per host (`fleet demo` injects a lab host without radio)
+- **1088 host:** host-owned ids from HELLO/REPORT; flat METRIC_MAP keys; one array element per host (`fleet demo` injects a lab host without radio) — any new Zigbee device type joins dynamically
 - **SD (M6):** on POST fail → enqueue each envelope; drain task batch POST when LTE recovers
 
 ## Zigbee
