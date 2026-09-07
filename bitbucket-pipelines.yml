@@ -80,7 +80,10 @@ definitions:
 
     - step: &host-tests
         name: Host unit tests
+        # Plain Ubuntu — Espressif IDF image has no host cmake on PATH.
+        image: ubuntu:22.04
         script:
+          - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake build-essential
           - cmake -S tests/host -B tests/host/build
           - cmake --build tests/host/build
           - ctest --test-dir tests/host/build --output-on-failure
