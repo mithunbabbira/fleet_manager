@@ -1,35 +1,59 @@
 # ESP-IDF build for firmware_v2/master (ESP32-C6 fleet telematics carrier).
 #
-# Uses Espressif's official IDF Docker image, which ships the toolchain
-# preinstalled — no export.sh/get_idf sourcing needed, idf.py is on PATH.
+# Pinned to v5.2.3 specifically (not the rolling release-v5.2 tag) —
+# firmware_v2/master/components/lte/lte.c's UART1 clock-enable workaround
+# depends on esp_private/uart_private.h, which moved/was removed in IDF
+# 5.3 and isn't guaranteed stable across every 5.2.x patch either. Do not
+# bump this image tag without first confirming that workaround still
+# compiles.
+#
+# Uses Espressif's official IDF Docker image, which ships the whole
+# toolchain (cmake, ninja, python3) baked in — but Bitbucket Pipelines runs
+# step scripts directly rather than through the image's entrypoint, so none
+# of that lands on PATH automatically. Steps that call idf.py/cmake source
+# $IDF_PATH/export.sh first to pull in what's already in the image; nothing
+# is installed at runtime there. Host unit tests don't need the ESP-IDF
+# toolchain at all, so that step just runs on plain Ubuntu instead.
 #
 # Two flows:
 #   - dev: builds its own binary every time (tagged "<VERSION>-dev.<build#>")
-#     and uploads it to s3://$S3_BUCKET/dev/. Independent from staging/prod.
+#     and publishes it. Independent from staging/prod.
 #   - staging + prod: compiled ONCE per pipeline run (tagged
-#     "<VERSION>-rel.<build#>"), uploaded to s3://$S3_BUCKET/staging/, then
-#     the exact same dist/ artifact — not a rebuild — is uploaded to
-#     s3://$S3_BUCKET/prod/ behind a manual approval gate. This guarantees
+#     "<VERSION>-rel.<build#>"), published under environment=staging, then
+#     the exact same dist/ artifact — not a rebuild — is published again
+#     under environment=prod behind a manual approval gate. This guarantees
 #     staging and prod ship byte-identical binaries.
+#
+# Publishing (tools/ci/publish_firmware.sh) POSTs the built .bin to Trafyn's
+# publish-device-firmware workflow — that's the only distribution path;
+# there is no S3 upload. This is also what makes the build discoverable by
+# the device's own OTA check (components/ota/ota_cloud.c). manufacturer/
+# deviceType in the script must match components/ota/Kconfig's defaults
+# exactly ("Espressif Systems" / "fleet monitor").
 #
 # Required setup in Bitbucket repo settings -> Deployments, one environment
 # each named exactly "dev", "staging", "prod", with these variables set
-# (secured for the AWS keys):
-#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION, S3_BUCKET
+# (secured):
+#   TRAFYN_AUTH_USER, TRAFYN_AUTH_PASS, TRAFYN_SYSTEM_USER_ID
+# Scoping them per-environment lets dev/staging/prod use different Trafyn
+# credentials if you ever want that, and gives you a Deployments dashboard
+# showing which version is live in each environment.
 #
 # Triggers:
-#   - dev branch     -> auto-builds and uploads to s3://$S3_BUCKET/dev/
-#   - staging branch -> auto-builds, uploads to s3://$S3_BUCKET/staging/,
-#                        then pauses on a manual step ("Promote to prod")
-#                        that ships that same build to s3://$S3_BUCKET/prod/
+#   - dev branch     -> auto-builds and publishes as environment=dev
+#   - staging branch -> auto-builds, publishes as environment=staging,
+#                        then pauses on a manual step ("Publish to Trafyn
+#                        (prod)") that publishes that same build again as
+#                        environment=prod
 # Both are also runnable on demand as custom pipelines regardless of branch.
+# There is no standalone "build prod" pipeline — prod only ever receives a
+# promoted staging build, never its own compile.
 #
 # Each flow runs the tests/host ctest suite as its first step; the
-# build/upload steps never run if any test fails.
+# build/publish steps never run if any test fails.
 #
 # Product app path: firmware_v2/master (artifact: fleet_v2_master.bin).
-# Lab builds use ESP-IDF 5.2.3; CI uses the nearest Espressif release image.
-image: espressif/idf:release-v5.2
+image: espressif/idf:v5.2.3
 
 definitions:
   steps:
@@ -37,6 +61,7 @@ definitions:
         name: Build firmware
         size: 2x
         script:
+          - . "$IDF_PATH/export.sh"
           - cd firmware_v2/master
           - idf.py set-target esp32c6
           - idf.py build
@@ -48,12 +73,11 @@ definitions:
           - bash tools/ci/build_firmware.sh dev
         artifacts:
           - dist/**
-    - step: &deploy-dev
-        name: Upload to S3 (dev)
-        image: amazon/aws-cli
+    - step: &publish-dev
+        name: Publish to Trafyn (dev)
         deployment: dev
         script:
-          - aws s3 cp dist "s3://${S3_BUCKET}/dev/" --recursive
+          - bash tools/ci/publish_firmware.sh dev
 
     - step: &build-release
         name: Build firmware (release candidate)
@@ -62,25 +86,24 @@ definitions:
           - bash tools/ci/build_firmware.sh rel
         artifacts:
           - dist/**
-    - step: &deploy-staging
-        name: Upload to S3 (staging)
-        image: amazon/aws-cli
+    - step: &publish-staging
+        name: Publish to Trafyn (staging)
         deployment: staging
         script:
-          - aws s3 cp dist "s3://${S3_BUCKET}/staging/" --recursive
-    - step: &promote-prod
-        name: Promote to S3 (prod)
-        image: amazon/aws-cli
+          - bash tools/ci/publish_firmware.sh staging
+    - step: &publish-prod
+        name: Publish to Trafyn (prod)
         deployment: prod
         trigger: manual
         script:
-          # Re-uploads the SAME dist/ produced by build-release above —
-          # no rebuild, so prod is guaranteed byte-identical to staging.
-          - aws s3 cp dist "s3://${S3_BUCKET}/prod/" --recursive
+          # Publishes the SAME dist/ produced by build-release above — no
+          # rebuild, so prod is guaranteed byte-identical to staging.
+          - bash tools/ci/publish_firmware.sh prod
 
     - step: &host-tests
         name: Host unit tests
-        # Plain Ubuntu — Espressif IDF image has no host cmake on PATH.
+        # Plain Ubuntu — the host test suite is pure C with no ESP-IDF
+        # dependency, so it doesn't need the (much heavier) IDF image.
         image: ubuntu:22.04
         script:
           - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake build-essential
@@ -100,20 +123,20 @@ pipelines:
     dev:
       - step: *host-tests
       - step: *build-dev
-      - step: *deploy-dev
+      - step: *publish-dev
     staging:
       - step: *host-tests
       - step: *build-release
-      - step: *deploy-staging
-      - step: *promote-prod
+      - step: *publish-staging
+      - step: *publish-prod
 
   custom:
     dev:
       - step: *host-tests
       - step: *build-dev
-      - step: *deploy-dev
+      - step: *publish-dev
     staging:
       - step: *host-tests
       - step: *build-release
-      - step: *deploy-staging
-      - step: *promote-prod
+      - step: *publish-staging
+      - step: *publish-prod
