@@ -1,0 +1,116 @@
+# ESP-IDF build for firmware_v2/master (ESP32-C6 fleet telematics carrier).
+#
+# Uses Espressif's official IDF Docker image, which ships the toolchain
+# preinstalled — no export.sh/get_idf sourcing needed, idf.py is on PATH.
+#
+# Two flows:
+#   - dev: builds its own binary every time (tagged "<VERSION>-dev.<build#>")
+#     and uploads it to s3://$S3_BUCKET/dev/. Independent from staging/prod.
+#   - staging + prod: compiled ONCE per pipeline run (tagged
+#     "<VERSION>-rel.<build#>"), uploaded to s3://$S3_BUCKET/staging/, then
+#     the exact same dist/ artifact — not a rebuild — is uploaded to
+#     s3://$S3_BUCKET/prod/ behind a manual approval gate. This guarantees
+#     staging and prod ship byte-identical binaries.
+#
+# Required setup in Bitbucket repo settings -> Deployments, one environment
+# each named exactly "dev", "staging", "prod", with these variables set
+# (secured for the AWS keys):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION, S3_BUCKET
+#
+# Triggers:
+#   - dev branch     -> auto-builds and uploads to s3://$S3_BUCKET/dev/
+#   - staging branch -> auto-builds, uploads to s3://$S3_BUCKET/staging/,
+#                        then pauses on a manual step ("Promote to prod")
+#                        that ships that same build to s3://$S3_BUCKET/prod/
+# Both are also runnable on demand as custom pipelines regardless of branch.
+#
+# Each flow runs the tests/host ctest suite as its first step; the
+# build/upload steps never run if any test fails.
+#
+# Product app path: firmware_v2/master (artifact: fleet_v2_master.bin).
+# Lab builds use ESP-IDF 5.2.3; CI uses the nearest Espressif release image.
+image: espressif/idf:release-v5.2
+
+definitions:
+  steps:
+    - step: &build-generic
+        name: Build firmware
+        size: 2x
+        script:
+          - cd firmware_v2/master
+          - idf.py set-target esp32c6
+          - idf.py build
+
+    - step: &build-dev
+        name: Build firmware (dev)
+        size: 2x
+        script:
+          - bash tools/ci/build_firmware.sh dev
+        artifacts:
+          - dist/**
+    - step: &deploy-dev
+        name: Upload to S3 (dev)
+        image: amazon/aws-cli
+        deployment: dev
+        script:
+          - aws s3 cp dist "s3://${S3_BUCKET}/dev/" --recursive
+
+    - step: &build-release
+        name: Build firmware (release candidate)
+        size: 2x
+        script:
+          - bash tools/ci/build_firmware.sh rel
+        artifacts:
+          - dist/**
+    - step: &deploy-staging
+        name: Upload to S3 (staging)
+        image: amazon/aws-cli
+        deployment: staging
+        script:
+          - aws s3 cp dist "s3://${S3_BUCKET}/staging/" --recursive
+    - step: &promote-prod
+        name: Promote to S3 (prod)
+        image: amazon/aws-cli
+        deployment: prod
+        trigger: manual
+        script:
+          # Re-uploads the SAME dist/ produced by build-release above —
+          # no rebuild, so prod is guaranteed byte-identical to staging.
+          - aws s3 cp dist "s3://${S3_BUCKET}/prod/" --recursive
+
+    - step: &host-tests
+        name: Host unit tests
+        script:
+          - cmake -S tests/host -B tests/host/build
+          - cmake --build tests/host/build
+          - ctest --test-dir tests/host/build --output-on-failure
+
+pipelines:
+  default:
+    - step: *host-tests
+    - step: *build-generic
+
+  branches:
+    main:
+      - step: *host-tests
+      - step: *build-generic
+    dev:
+      - step: *host-tests
+      - step: *build-dev
+      - step: *deploy-dev
+    staging:
+      - step: *host-tests
+      - step: *build-release
+      - step: *deploy-staging
+      - step: *promote-prod
+
+  custom:
+    dev:
+      - step: *host-tests
+      - step: *build-dev
+      - step: *deploy-dev
+    staging:
+      - step: *host-tests
+      - step: *build-release
+      - step: *deploy-staging
+      - step: *promote-prod
