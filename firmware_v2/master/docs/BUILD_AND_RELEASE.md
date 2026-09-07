@@ -2,6 +2,21 @@
 
 Short checklist for `firmware_v2/master` (project `fleet_v2_master`).
 
+## CI (Bitbucket Pipelines)
+
+Repo root files (required for Bitbucket to build bins in CI):
+
+| File | Role |
+|------|------|
+| [`bitbucket-pipelines.yml`](../../../bitbucket-pipelines.yml) | Pipeline definitions (host tests → build → optional S3 deploy) |
+| [`tools/ci/build_firmware.sh`](../../../tools/ci/build_firmware.sh) | Builds `firmware_v2/master`, stamps version, packs `dist/` |
+
+- Default / `main`: host tests + `idf.py build` in `firmware_v2/master`
+- `dev` / `staging`: stamp `VERSION` as `<base>-dev.<N>` / `<base>-rel.<N>`, upload to S3
+- Artifact name in dist: `fleet-telematics-node-<ver>.bin` (from `fleet_v2_master.bin`)
+
+Bitbucket Deployments need `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `S3_BUCKET`.
+
 ## Before you change code
 
 1. Work on a branch that has `firmware_v2/master/` (e.g. `firmware-v2` or Bitbucket `main`).
