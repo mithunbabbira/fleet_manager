@@ -1,48 +1,57 @@
 # ESP32-C6 Fleet Telematics — Project Context
 
-> Last updated: 2026-08-03 on `feature/mcp2515-can`.
+> Last updated: 2026-09-07 (Bitbucket main cleaned around `firmware_v2/master`).
 >
-> The production data path is direct vehicle CAN through MCP2515. Local access is
-> USB Serial/JTAG plus Wi-Fi SoftAP/HTTP, and cloud telemetry uses a Quectel EC200U
-> LTE modem. The retired wireless OBD adapter stack has been deleted.
+> Production data path: vehicle CAN through MCP2515; optional Zigbee sensor hosts
+> via `transport_zigbee` → `host_registry`. Local access: USB Serial/JTAG plus
+> PC **Carrier Console** (`tools/carrier_console`, port 8766). Cloud: Quectel EC200U
+> over **QHTTP AT** (no PPP). The BLE ELM327 adapter stack and the legacy root
+> ESP-IDF app (`elm327_esp32c6`) have been removed from this tree.
 >
-> Flash layout is dual-bank OTA (`ota_0` + `ota_1`). Lab manifest + `.bin` host:
-> `tools/ota_dev_server/`. Design: `docs/superpowers/specs/2026-07-31-lte-ota-design.md`.
+> Authoritative pin map:
+> `hardware/fleet_telematics_carrier/README.md`
+> Fabricated gerbers: `Vehical_Telematics_Design.zip` (KiCad 9, 2026-08-12).
+>
+> Flash layout is dual-bank OTA (`ota_0` + `ota_1`). LTE firmware check: Trafyn
+> POST `get-latest-device-firmware` (see
+> `docs/superpowers/specs/2026-08-19-trafyn-firmware-ota-design.md`).
+>
+> Telemetry uplink: Trafyn
+> `POST …/nc-events-api/v1/sources/nc-fleet-device/messages` (bare JSON array;
+> master sets `device_type` for OBD/GPS only).
 
 ## Product
 
-ESP-IDF firmware (CMake project name `elm327_esp32c6`) for an ESP32-C6 Mini. It:
+ESP-IDF firmware under **`firmware_v2/master/`** (CMake project name
+`fleet_v2_master`) for an ESP32-C6 Super Mini. It:
 
 - detects ISO 15765-4 CAN at 11/29-bit identifiers and 500/250 kbit/s;
-- polls profile-driven OBD PIDs and decodes PIDs, DTCs, and VIN;
-- enforces `cmd_policy` before sending vehicle commands;
-- exposes status, control, and telemetry through USB and a SoftAP web UI/API;
-- posts telemetry through an EC200U using Quectel HTTPS commands.
+- polls Mode-01 OBD PIDs and builds schema **1087** envelopes;
+- posts modem GNSS as schema **1089**;
+- ingests Zigbee host TLV reports as schema **1088** (dynamic hosts);
+- exposes status and control through USB serial and the PC Carrier Console;
+- posts telemetry through an EC200U using Quectel QHTTP AT commands (HTTPS);
+- stores failed posts on microSD and drains when LTE recovers;
+- updates itself via Trafyn get-latest dual-bank OTA.
 
-The default profile is `fleet_basic`. The CAN path was validated in-car on
-2026-07-29 with CAN11/500 and live RPM, speed, coolant, and throttle data.
-
-## Hardware
+## Hardware (printed PCB — what firmware uses)
 
 | Item | Detail |
 |---|---|
-| MCU | ESP32-C6 Mini, 4 MB flash |
-| CAN | MCP2515 over SPI through TXS0108E level shifter; GPIO21 SCK, GPIO22 MOSI, GPIO23 MISO, GPIO20 CS, GPIO14 INT |
-| Console | USB Serial/JTAG, 115200 8N1 |
-| Wi-Fi | SoftAP `Fleet-C6`, password `fleetc61`, UI at `http://192.168.4.1/` |
-| LTE | Quectel EC200U on UART1; GPIO17 TX, GPIO16 RX, 115200 8N1 |
+| MCU | ESP32-C6 Super Mini, 4 MB flash |
+| CAN | MCP2515 over **soft-SPI** through TXS0108E; GPIO21 SCK, 22 MOSI, 23 MISO, 20 CS, 14 INT |
+| microSD | Hardware SPI2 GPIO4 SCK, 5 MOSI, 6 MISO, 18 CS |
+| Console | USB Serial/JTAG, 115200 8N1; PC UI at `tools/carrier_console` |
+| LTE | EC200U UART1: **GPIO16 ESP-TX → modem RX**, **GPIO17 ESP-RX ← modem TX**, 115200 8N1 |
 | APN | `airtelgprs.com` by default |
-
-The modem requires its own suitable supply, PWRKEY sequencing, and common ground.
-UART1 is reserved for LTE.
 
 ## Build and test
 
 ```bash
-source ~/esp/esp-idf/export.sh
+source ~/esp/esp-idf/export.sh   # ESP-IDF v5.2.3
+cd firmware_v2/master
 idf.py set-target esp32c6
 idf.py build
-idf.py -p PORT flash monitor
 ```
 
 Host tests:
@@ -53,83 +62,25 @@ cmake --build tests/host/build
 ctest --test-dir tests/host/build --output-on-failure
 ```
 
-Important defaults:
+## Layout
 
-- ESP32-C6 target, 4 MB flash, custom `partitions.csv`;
-- USB Serial/JTAG console;
-- Bluetooth disabled; SoftAP enabled;
-- OBD command timeout 12 seconds;
-- LTE enabled with the Airtel APN above.
+| Path | Role |
+|---|---|
+| `firmware_v2/master/` | Carrier master firmware (only ESP-IDF app) |
+| `firmware_v2/host/` | How to build Zigbee sensor hosts |
+| `hardware/fleet_telematics_carrier/` | PCB docs + host PlatformIO projects |
+| `tools/carrier_console/` | USB provisioning web UI |
+| `tools/telemetry_mock/` | Lab Trafyn-shaped uplink mock |
+| `tools/ci/` | Bitbucket build/package scripts |
+| `tests/host/` | Host-side unit tests against v2 sources |
+| `docs/` | Specs, plans, archive |
 
-## Active components
+## Active firmware modules
 
-```text
-components/
-├── can_obd/             MCP2515, ISO-TP, protocol detection, OBD transaction API
-├── cmd_policy/          read-only allowlist gate
-├── net_lte/             EC200U UART control and HTTPS transport
-├── obd_codec/           PID, DTC, and VIN decoding
-├── obd_poller/          profile-driven poll task and raw-command queue
-├── profile_store/       NVS profiles and safety settings
-├── store_sd/            microSD (SPI CS18) durable uplink queue
-├── sys_runtime/         watchdog, metrics, and OTA stub
-├── telemetry_bus/       in-process typed pub/sub
-├── telemetry_uplink/    LTE cloud payload, SD enqueue, batch drain
-├── transport_http/      SoftAP, REST API, and embedded web UI
-└── transport_serial/    USB interactive console
-```
+See [`firmware_v2/master/docs/MASTER.md`](firmware_v2/master/docs/MASTER.md).
 
-The old wireless adapter transport, client, and radio components no longer
-exist or participate in CMake.
+## Non-goals in this tree
 
-## Data flow
-
-```text
-MCP2515 → can_obd → obd_poller → telemetry_bus
-                           ├──→ transport_serial
-                           ├──→ transport_http
-                           └──→ telemetry_uplink → store_sd → net_lte → cloud
-                                              (or live POST if SD missing)
-
-profile_store → obd_poller / command safety / uplink configuration
-sys_runtime   → watchdog and metrics across the application
-```
-
-`can_obd` owns vehicle transactions. Serial and HTTP submit raw requests through
-`obd_poller`, which applies command policy. The poller starts after CAN protocol
-detection and pauses while the CAN link is unavailable.
-
-## Boot flow
-
-1. Initialize NVS, runtime metrics/watchdog, profiles, and telemetry bus.
-2. Start LTE (OTA auto-check); failures are non-fatal.
-3. Init SPI2 mutex → MCP2515 (`can_obd`) → microSD (`store_sd`).
-4. Start telemetry uplink (produce→SD queue, drain→batch POST).
-5. Start serial and SoftAP/HTTP transports; confirm OTA if pending.
-6. Start `obd_poller` paused; CAN boot task enables it when an ECU responds.
-
-## Interfaces
-
-Serial commands: `help`, `status`, `cmd`, `profiles`, `profile`, `telemetry`,
-`unsafe`, `metrics`, `lte`, and `uplink`.
-
-HTTP serves the embedded UI plus status, protocol, profile, telemetry, metrics,
-LTE, uplink, VIN, DTC, safety, health, and raw OBD command APIs. See
-`components/transport_http/http_api.c` for the authoritative route list.
-
-## LTE uplink
-
-`telemetry_uplink` builds OBD snapshots (including optional `lat`/`lng`/`gps_ok`
-from the EC200U GNSS cache when fixed) and enqueues them on microSD
-(`/sdcard/uplinkq.dat`). A drain task batch-POSTs events to the fleet
-endpoint through the EC200U and removes records only after HTTP 2xx. If the SD
-card is missing, it falls back to live single-event POST. SoftAP/serial status
-exposes queue depth, SD mount state, and GNSS fix (`uplink` command). See
-`docs/superpowers/specs/2026-08-06-sd-uplink-queue-design.md`.
-
-## Known follow-up work
-
-- Validate the full build, image size, and hardware behavior after stack removal.
-- Complete production OTA support (`sys_runtime` currently exposes a stub).
-- Keep legacy NVS namespace/key names only where changing them would require an
-  explicit migration.
+- Root `CMakeLists.txt` / `components/` / `main/` (deleted — use `firmware_v2/master`)
+- SoftAP `.bin` upload as the primary OTA path
+- BLE ELM327 adapter stack

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fleet Carrier Console</title>
+  <link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Fleet Carrier Console</h1>
+      <div class="header-actions">
+        <span class="pill" id="linkPill">disconnected</span>
+        <button type="button" id="quitBtn" class="danger" title="Stop this PC app">Quit app</button>
+      </div>
+    </header>
+
+    <section class="card conn">
+      <label>Serial port</label>
+      <div class="row">
+        <select id="portSel"></select>
+        <button type="button" id="refreshBtn">Refresh</button>
+        <button type="button" id="connectBtn" class="primary">Connect</button>
+        <button type="button" id="disconnectBtn">Disconnect</button>
+      </div>
+      <p class="hint">Carrier ESP32 is serial-only. This page runs on your computer (default port 8766).</p>
+    </section>
+
+    <section class="hero card">
+      <div class="label">Vehicle link</div>
+      <div class="value" id="canStatus">—</div>
+      <div class="sub" id="canMeta">Connect and refresh status</div>
+    </section>
+
+    <section class="card dashboard">
+      <div class="dash-grid">
+        <div class="dash-col">
+          <div class="dash-head">
+            <h2>Connected hosts</h2>
+            <span class="pill" id="hostsPill">0 joined</span>
+          </div>
+          <div id="hostsList" class="hosts-list">
+            <p class="empty-hint">Connect the carrier over USB — hosts refresh automatically.</p>
+          </div>
+          <div class="dash-foot">
+            <button type="button" id="fleetHostsRefresh">Refresh hosts</button>
+            <span class="hint" id="hostsUpdated">Not refreshed yet</span>
+          </div>
+        </div>
+        <div class="dash-col">
+          <h2>Carrier</h2>
+          <dl class="kv-list" id="carrierKv">
+            <div><dt>Firmware</dt><dd id="kvFw">—</dd></div>
+            <div><dt>Device ID</dt><dd id="kvDid">—</dd></div>
+            <div><dt>Uptime</dt><dd id="kvUptime">—</dd></div>
+            <div><dt>LTE</dt><dd id="kvLte">—</dd></div>
+            <div><dt>Zigbee</dt><dd id="kvZigbee">—</dd></div>
+            <div><dt>Uplink</dt><dd id="kvUplink">—</dd></div>
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="diagnosticsCard">
+      <div class="dash-head">
+        <h2>Diagnostics</h2>
+        <span class="pill" id="diagPill">fleet path</span>
+      </div>
+      <p class="hint" style="margin-top:0">
+        Zigbee hosts → carrier registry → uplink envelope (<code>node_id</code> / <code>schemaId</code>).
+        Same data as <strong>Refresh hosts</strong>.
+      </p>
+
+      <h3 class="diag-sub">Hosts</h3>
+      <div id="diagEmpty" class="empty-hint">Connect the carrier over USB — diagnostics refresh with hosts.</div>
+      <div class="diag-table-wrap" id="diagHostTable" hidden>
+        <table class="diag-table">
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>Type</th>
+              <th>Node</th>
+              <th>Schema</th>
+              <th>Link</th>
+              <th>Last report</th>
+              <th>Readings</th>
+            </tr>
+          </thead>
+          <tbody id="diagHostBody"></tbody>
+        </table>
+      </div>
+
+      <h3 class="diag-sub">Carrier Zigbee</h3>
+      <dl class="kv-list diag-kv">
+        <div><dt>Radio</dt><dd id="diagZbRadio">—</dd></div>
+        <div><dt>Reports</dt><dd id="diagZbReports">—</dd></div>
+      </dl>
+
+      <h3 class="diag-sub">Carrier path</h3>
+      <dl class="kv-list diag-kv">
+        <div><dt>GPS</dt><dd id="diagGps">—</dd></div>
+        <div><dt>Last uplink</dt><dd id="diagUplinkLast">—</dd></div>
+        <div><dt>SD queue</dt><dd id="diagSdQueue">—</dd></div>
+      </dl>
+
+      <div class="dash-foot">
+        <button type="button" id="diagRefreshBtn">Refresh hosts</button>
+        <button type="button" id="diagCopyBtn">Copy fleet snapshot</button>
+        <span class="hint" id="diagCopyStatus"></span>
+      </div>
+    </section>
+
+    <section class="card" id="provisionCard">
+      <h2>Device identity <span class="pill" id="provisionPill">not provisioned</span></h2>
+      <p class="hint">Set a unique device ID and node ID once per unit before enabling uplink or OTA. Stored in flash (NVS).</p>
+      <div class="row2">
+        <div><label>Device ID *</label><input id="uplinkDid" placeholder="carrier-001" required></div>
+        <div><label>Node ID *</label><input id="uplinkNid" placeholder="node-1" required></div>
+      </div>
+      <div class="row actions">
+        <button type="button" id="provisionBtn" class="primary">Save identity</button>
+      </div>
+    </section>
+
+    <div class="grid2">
+      <div>
+        <section class="card">
+          <h2>Cloud uplink</h2>
+          <div class="check-row">
+            <input type="checkbox" id="uplinkEn">
+            <label for="uplinkEn" style="margin:0">Enable cloud uplink</label>
+          </div>
+          <label>Telemetry POST URL</label>
+          <input id="uplinkUrl" placeholder="factory default if empty">
+          <label>Schema ID</label>
+          <input id="uplinkSchema" placeholder="1087">
+          <label>Interval (seconds)</label>
+          <input id="uplinkIv" type="number" min="5" max="3600" value="60">
+          <div class="row actions">
+            <button type="button" id="uplinkApply">Apply uplink settings</button>
+            <button type="button" id="uplinkNow">Send now</button>
+            <button type="button" id="uplinkQtest">Queue test</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>LTE OTA</h2>
+          <div class="check-row">
+            <input type="checkbox" id="otaForce">
+            <label for="otaForce" style="margin:0">Force OTA (ignore version match)</label>
+          </div>
+          <label>Firmware check URL</label>
+          <input id="otaUrl" placeholder="https://…">
+          <div class="row actions">
+            <button type="button" id="otaApply">Apply OTA settings</button>
+            <button type="button" id="otaRun">Run OTA check</button>
+            <button type="button" id="otaStatus">OTA status</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>LTE modem</h2>
+          <div class="row actions">
+            <button type="button" id="lteStatus">Refresh LTE</button>
+            <button type="button" id="lteReconnect">Reconnect</button>
+            <button type="button" id="lteTest">Self-test (~90s)</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="card log-card">
+        <h2>Serial log</h2>
+        <pre id="log"></pre>
+      </section>
+    </div>
+
+    <div class="grid3">
+      <section class="card">
+        <h2>OBD profile</h2>
+        <label>Active profile</label>
+        <select id="profileSel"></select>
+        <div class="row actions">
+          <button type="button" id="profilesRefresh">List profiles</button>
+          <button type="button" id="profileApply" class="primary">Set profile</button>
+        </div>
+        <div id="profileList" class="profile-list"></div>
+      </section>
+
+      <section class="card">
+        <h2>OBD / DTC</h2>
+        <label>Raw OBD command</label>
+        <div class="row">
+          <input id="obdCmd" placeholder="010C" style="flex:1">
+          <button type="button" id="obdSend">Send</button>
+        </div>
+        <div class="row actions">
+          <button type="button" id="vinBtn">Read VIN</button>
+          <button type="button" id="dtcRead">Read DTCs</button>
+          <button type="button" id="dtcClear" class="danger">Clear DTCs</button>
+        </div>
+        <div id="dtcOut" class="dtc-out"></div>
+      </section>
+
+      <section class="card">
+        <h2>Safety &amp; fleet</h2>
+        <div class="check-row">
+          <input type="checkbox" id="unsafeEn">
+          <label for="unsafeEn" style="margin:0">Allow unsafe (Mode 04 clear)</label>
+        </div>
+        <div class="row actions">
+          <button type="button" id="unsafeApply">Apply safety</button>
+          <button type="button" id="fleetHosts">Fleet hosts</button>
+          <button type="button" id="statusBtn" class="primary">Refresh status</button>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script src="/static/app.js?v=13"></script>
+</body>
+</html>

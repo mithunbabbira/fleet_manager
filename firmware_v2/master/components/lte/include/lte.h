@@ -1,0 +1,138 @@
+#pragma once
+
+#include "esp_err.h"
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    bool enabled;
+    bool uart_ok;
+    bool link_up;
+    bool ip_up;
+    bool sim_ready;
+    bool registered;
+    bool attached;
+    int csq;       /* raw AT+CSQ value 0..31, 99 = unknown */
+    int rssi_dbm;  /* derived from csq, 0 if unknown */
+    char ip[16];
+    char apn[64];
+    char operator_name[32];
+    char last_error[64];
+    char ati[64];
+} lte_status_t;
+
+/**
+ * @brief Start UART1 + background modem bring-up (and GPS task if enabled).
+ * @return ESP_OK, ESP_ERR_NOT_SUPPORTED if disabled, or init errors.
+ * @note Non-blocking: AT probing runs in lte_bringup. Pins: TX=CONFIG TX GPIO, RX=RX GPIO.
+ */
+esp_err_t lte_start(void);
+
+/**
+ * @brief Copy cached modem status (SIM/reg/CSQ/APN/IP/last_error).
+ */
+esp_err_t lte_get_status(lte_status_t *out);
+
+/**
+ * @brief Re-query CPIN/CSQ/COPS/CxREG/CGATT over AT (takes UART mutex each command).
+ */
+esp_err_t lte_refresh(void);
+
+/**
+ * @brief Blocking self-test: AT → SIM → register → PDP → optional ping; fills @p report.
+ * @note Holds UART mutex up to ~120s. PDP "FAIL" with IP present often means already active.
+ */
+esp_err_t lte_selftest(char *report, size_t report_len);
+
+/**
+ * @brief Soft reconnect helper (currently re-enters lte_start).
+ */
+esp_err_t lte_reconnect(void);
+
+typedef struct {
+    bool gps_ok;
+    double lat;
+    double lng;
+    uint32_t age_ms;
+} lte_gps_t;
+
+/**
+ * @brief Copy age-gated GNSS cache; gps_ok false if never fixed or older than max age.
+ * @note Uses s_gps_mutex — does not wait on in-flight HTTP.
+ */
+esp_err_t lte_gps_get(lte_gps_t *out);
+
+typedef enum {
+    LTE_TIME_NONE = 0,
+    LTE_TIME_CCLK,
+    LTE_TIME_GPS,
+} lte_time_source_t;
+
+typedef struct {
+    bool time_ok;
+    uint64_t epoch_ms_utc;
+    lte_time_source_t source;
+} lte_time_t;
+
+/**
+ * @brief Wall-clock UTC epoch ms extrapolated from last modem sync; 0 if unsynced.
+ * @note telemetry_uplink falls back to esp_timer uptime when this returns 0.
+ */
+uint64_t lte_time_now_ms(void);
+
+/** @brief Snapshot of wall-clock sync state. */
+esp_err_t lte_time_get(lte_time_t *out);
+
+typedef struct {
+    int http_status; /* 0 if unknown / transport failed before status */
+    char error[96];
+} lte_http_result_t;
+
+/**
+ * @brief HTTPS POST JSON via QHTTP (2xx = success). Serializes on UART mutex.
+ */
+esp_err_t lte_http_post(const char *url, const char *body, lte_http_result_t *out);
+
+typedef struct {
+    const char *authorization;   /* NULL or "" → omit header */
+    const char *system_user_id;  /* NULL or "" → omit header */
+} lte_http_req_headers_t;
+
+/**
+ * @brief HTTPS POST with optional custom headers and optional response body capture.
+ * @note When resp_buf non-NULL, streams QHTTPREAD into buffer; else short-drain.
+ */
+esp_err_t lte_http_post_recv(const char *url, const char *body,
+                                 const lte_http_req_headers_t *hdr,
+                                 char *resp_buf, size_t resp_buf_len, size_t *resp_len,
+                                 lte_http_result_t *out);
+
+/**
+ * @brief HTTPS GET into a small buffer (manifest-sized). Holds mutex up to ~300s.
+ */
+esp_err_t lte_http_get(const char *url, char *buf, size_t buf_len, size_t *out_len,
+                          lte_http_result_t *out);
+
+typedef esp_err_t (*lte_http_chunk_cb_t)(const uint8_t *data, size_t len, void *ctx);
+
+/**
+ * @brief HTTPS GET streaming for large bodies (OTA .bin); invokes chunk callback.
+ * @note Does not buffer the full body in RAM.
+ */
+esp_err_t lte_http_get_stream(const char *url, lte_http_chunk_cb_t cb, void *ctx,
+                                  size_t *content_length_out, lte_http_result_t *out);
+
+/**
+ * @brief Pause GPS (and other BG AT) while LTE OTA owns the modem UART.
+ * @note Only gps_task honors this today; other at_transact callers still contend via mutex.
+ */
+void lte_suspend_bg_at(bool suspend);
+
+#ifdef __cplusplus
+}
+#endif

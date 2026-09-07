@@ -1,0 +1,4 @@
+# Ignore runtime capture from the lab mock
+received.jsonl
+__pycache__/
+*.pyc

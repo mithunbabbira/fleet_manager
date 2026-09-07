@@ -1,0 +1,34 @@
+menu "Telemetry uplink (v2)"
+
+    config UPLINK_URL
+        string "POST URL for telemetry events (fleet-wide; from bin only)"
+        default ""
+        help
+            Set the real URL in firmware_v2/master/sdkconfig.defaults only
+            (CONFIG_UPLINK_URL). Do not duplicate here. Not stored in NVS.
+
+    config UPLINK_TICK_SEC
+        int "Uplink GPS tick interval (seconds)"
+        default 30
+        range 10 3600
+
+    config UPLINK_VEHICLE_WRAP
+        bool "Wrap POST body as {\"Vehicle\":[...envelopes...]}"
+        default n
+        help
+            Off for Trafyn /nc-events-api/v1/sources/nc-fleet-device/messages (bare JSON array).
+            Enable only if a backend still requires a top-level Vehicle key.
+
+    config UPLINK_DEVICE_TYPE_OBD
+        string "device_type field for OBD (1087) envelopes"
+        default "obd"
+
+    config UPLINK_DEVICE_TYPE_GPS
+        string "device_type field for GPS (1089) envelopes"
+        default "gps"
+        help
+            Master-owned streams only. Zigbee hosts are dynamic (fuel or any
+            new type); their envelopes omit device_type and carry host_type
+            in payload — backend keys them by device_id.
+
+endmenu

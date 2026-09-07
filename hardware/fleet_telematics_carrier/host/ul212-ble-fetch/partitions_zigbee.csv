@@ -1,0 +1,8 @@
+# Zigbee ED layout for 4MB XIAO ESP32-C6 (larger app slot for BLE+WiFi+ZB).
+# Name,     Type, SubType, Offset,  Size, Flags
+nvs,        data, nvs,     0x9000,  0x5000,
+otadata,    data, ota,     0xe000,  0x2000,
+app0,       app,  ota_0,   0x10000, 0x1D0000,
+spiffs,     data, spiffs,  0x1E0000, 0x100000,
+zb_storage, data, fat,     0x2E0000, 0x4000,
+zb_fct,     data, fat,     0x2E4000, 0x1000,

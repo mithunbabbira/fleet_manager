@@ -1,0 +1,44 @@
+menu "Cloud OTA (Trafyn get-latest)"
+
+    config OTA_CLOUD_AUTO_CHECK
+        bool "Auto-check firmware after LTE is up"
+        default y
+
+    config OTA_CLOUD_CHECK_URL
+        string "Firmware-check POST URL (fleet-wide; from bin only)"
+        default ""
+        help
+            Set the real URL in firmware_v2/master/sdkconfig.defaults only
+            (CONFIG_OTA_CLOUD_CHECK_URL). Do not duplicate here. Not stored in NVS.
+
+    config OTA_CLOUD_AUTH_HEADER
+        string "Optional Authorization header value (empty = omit)"
+        default ""
+
+    config OTA_CLOUD_SYSTEM_USER_ID
+        string "Optional x-nc-system-user-id (empty = omit)"
+        default ""
+
+    config OTA_CLOUD_MANUFACTURER
+        string "Trafyn manufacturer"
+        default "Espressif Systems"
+
+    config OTA_CLOUD_DEVICE_TYPE
+        string "Trafyn deviceType"
+        default "fleet monitor"
+
+    config OTA_CLOUD_AUTO_WAIT_SEC
+        int "Max seconds to wait for LTE before first check"
+        range 30 600
+        default 90
+        depends on OTA_CLOUD_AUTO_CHECK
+
+    config OTA_CLOUD_AUTO_INTERVAL_MIN
+        int "Minutes between auto OTA checks"
+        range 5 10080
+        default 30
+        depends on OTA_CLOUD_AUTO_CHECK
+        help
+            Lab-friendly default is 30 minutes. Production fleets may use 240 (4h).
+
+endmenu

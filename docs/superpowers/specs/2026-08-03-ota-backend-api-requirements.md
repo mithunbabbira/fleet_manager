@@ -1,5 +1,9 @@
 # Fleet OTA — Backend API Requirements (v1)
 
+**Superseded for device behavior** by
+[`2026-08-19-trafyn-firmware-ota-design.md`](2026-08-19-trafyn-firmware-ota-design.md).
+The remainder of this file is kept as historical reference.
+
 Device: ESP32-C6 + Quectel EC200U LTE  
 Purpose: Tell backend what to expose so the device can download firmware over cellular.
 
@@ -100,7 +104,7 @@ Set this **once per device** (or whenever the host / ngrok URL changes). Prefer 
 
 ### 5.1 SoftAP (usual)
 
-1. Join SoftAP **`Fleet-C6`** / password **`fleetc6`**.
+1. Join SoftAP **`Fleet-C6`** / password **`fleetc61`**.
 2. Open the config page.
 3. In **LTE OTA → Manifest URL**, set:
 

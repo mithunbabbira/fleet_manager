@@ -1,8 +1,8 @@
 # LTE Telemetry Cloud Uplink — Design Spec
 
 **Date:** 2026-07-24  
-**Status:** Approved for planning  
-**Platform:** ESP32-C6 Mini + Quectel EC200U (UART1)  
+**Status:** Implemented on MCP2515 (not BLE ELM). UART pins: printed PCB GPIO16 TX / GPIO17 RX.  
+**Platform:** ESP32-C6 Mini + Quectel EC200U (UART1 GPIO16 TX / GPIO17 RX on the printed PCB)  
 **Related:** `PROJECT_CONTEXT.md`, `docs/sample-obd-telemetry.md`, `net_lte` Phase-1 AT path
 
 ## 1. Goal

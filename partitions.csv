@@ -1,8 +1,0 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-# Dual-bank OTA for ESP32-C6FH4 4MB flash (ota_0 + ota_1).
-# App is ~1.0 MiB after BLE trim; each slot is 0x1C0000 (~1.75 MiB).
-nvs,      data, nvs,     0x9000,  0x6000,
-otadata,  data, ota,     0xf000,  0x2000,
-phy_init, data, phy,     0x11000, 0x1000,
-ota_0,    app,  ota_0,   0x20000, 0x1C0000,
-ota_1,    app,  ota_1,   0x1E0000,0x1C0000,

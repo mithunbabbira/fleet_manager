@@ -1,0 +1,24 @@
+menu "Fleet Zigbee"
+
+config FLEET_ZIGBEE_ENABLE
+    bool "Enable Zigbee coordinator transport"
+    default n
+    help
+        Master forms an open Zigbee network and receives host TLV frames.
+        When disabled, use transport_zigbee_ingest() for USB loopback tests.
+
+config FLEET_ZIGBEE_CHANNEL
+    int "Zigbee channel (11-26)"
+    depends on FLEET_ZIGBEE_ENABLE
+    range 11 26
+    default 15
+
+config FLEET_ZIGBEE_EPAN_ID
+    string "Extended PAN ID (16 hex digits, MSB-first)"
+    depends on FLEET_ZIGBEE_ENABLE
+    default "F1EE700000000001"
+    help
+        Must match the host FLEET_ZB_EPAN_ID. Unique per truck together with channel.
+        Changing this requires erase-flash once so Zigbee NVS does not keep the old network.
+
+endmenu

@@ -1,5 +1,0 @@
-# Lab firmware drops (gitignored *.bin).
-# Example:
-#   mkdir -p 1.0.0
-#   cp ../../../build/elm327_esp32c6.bin 1.0.0/
-#   shasum -a 256 1.0.0/elm327_esp32c6.bin | awk '{print $1}' > 1.0.0/elm327_esp32c6.bin.sha256

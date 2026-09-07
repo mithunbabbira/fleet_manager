@@ -2,41 +2,82 @@ cmake_minimum_required(VERSION 3.16)
 project(elm_host_tests C)
 set(CMAKE_C_STANDARD 11)
 
-add_executable(test_cmd_policy
-    test_cmd_policy.c
-    ${CMAKE_SOURCE_DIR}/../../components/cmd_policy/cmd_policy.c
-)
-target_include_directories(test_cmd_policy PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../components/cmd_policy/include
-)
-
-add_executable(test_obd_codec
-    test_obd_codec.c
-    ${CMAKE_SOURCE_DIR}/../../components/obd_codec/obd_codec.c
-)
-target_include_directories(test_obd_codec PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../components/obd_codec/include
-)
-target_link_libraries(test_obd_codec m)
-
-add_executable(test_uplink_payload
-    test_uplink_payload.c
-    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/uplink_payload.c
-)
-target_include_directories(test_uplink_payload PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../components/telemetry_uplink/include
-)
-
-add_executable(test_obd_isotp
-    test_obd_isotp.c
-    ${CMAKE_SOURCE_DIR}/../../components/can_obd/obd_isotp.c
-)
-target_include_directories(test_obd_isotp PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../components/can_obd/include
-)
+set(V2_MASTER "${CMAKE_SOURCE_DIR}/../../firmware_v2/master")
 
 enable_testing()
-add_test(NAME test_cmd_policy COMMAND test_cmd_policy)
-add_test(NAME test_obd_codec COMMAND test_obd_codec)
-add_test(NAME test_uplink_payload COMMAND test_uplink_payload)
-add_test(NAME test_obd_isotp COMMAND test_obd_isotp)
+
+configure_file(
+    ${CMAKE_SOURCE_DIR}/shims/esp_shim.h
+    ${CMAKE_CURRENT_BINARY_DIR}/shims/esp_err.h
+    COPYONLY
+)
+
+add_executable(test_cli_format_v2
+    test_cli_format_v2.c
+    ${V2_MASTER}/components/cli/cli_format.c
+    ${V2_MASTER}/components/lte/lte_time.c
+)
+target_include_directories(test_cli_format_v2 PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/shims
+    ${V2_MASTER}/components/cli/include
+    ${V2_MASTER}/components/lte/include
+)
+add_test(NAME test_cli_format_v2 COMMAND test_cli_format_v2)
+
+add_executable(test_uplink_envelope_v2
+    test_uplink_envelope_v2.c
+    ${V2_MASTER}/components/uplink/uplink_envelope.c
+)
+target_include_directories(test_uplink_envelope_v2 PRIVATE
+    ${V2_MASTER}/components/uplink/include
+)
+target_link_libraries(test_uplink_envelope_v2 m)
+add_test(NAME test_uplink_envelope_v2 COMMAND test_uplink_envelope_v2)
+
+add_executable(test_uplink_obd_v2
+    test_uplink_obd_v2.c
+    ${V2_MASTER}/components/uplink/uplink_obd.c
+    ${V2_MASTER}/components/uplink/uplink_envelope.c
+)
+target_include_directories(test_uplink_obd_v2 PRIVATE
+    ${V2_MASTER}/components/uplink/include
+)
+target_link_libraries(test_uplink_obd_v2 m)
+add_test(NAME test_uplink_obd_v2 COMMAND test_uplink_obd_v2)
+
+add_executable(test_uplink_host_v2
+    test_uplink_host_v2.c
+    ${V2_MASTER}/components/uplink/uplink_host.c
+)
+target_include_directories(test_uplink_host_v2 PRIVATE
+    ${V2_MASTER}/components/uplink/include
+)
+target_link_libraries(test_uplink_host_v2 m)
+add_test(NAME test_uplink_host_v2 COMMAND test_uplink_host_v2)
+
+add_executable(test_uplink_queue_v2
+    test_uplink_queue_v2.c
+    ${V2_MASTER}/components/uplink/uplink_queue.c
+)
+target_include_directories(test_uplink_queue_v2 PRIVATE
+    ${V2_MASTER}/components/uplink/include
+)
+add_test(NAME test_uplink_queue_v2 COMMAND test_uplink_queue_v2)
+
+add_executable(test_uplink_batch_v2
+    test_uplink_batch_v2.c
+    ${V2_MASTER}/components/uplink/uplink_batch.c
+)
+target_include_directories(test_uplink_batch_v2 PRIVATE
+    ${V2_MASTER}/components/uplink/include
+)
+add_test(NAME test_uplink_batch_v2 COMMAND test_uplink_batch_v2)
+
+add_executable(test_fleet_zb_epan
+    test_fleet_zb_epan.c
+    ${V2_MASTER}/components/transport_zigbee/fleet_zb_epan.c
+)
+target_include_directories(test_fleet_zb_epan PRIVATE
+    ${V2_MASTER}/components/transport_zigbee/include
+)
+add_test(NAME test_fleet_zb_epan COMMAND test_fleet_zb_epan)
