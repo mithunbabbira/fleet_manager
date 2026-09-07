@@ -1,5 +1,7 @@
 # Firmware v2 master — module map
 
+**Build / version bump checklist:** [`BUILD_AND_RELEASE.md`](BUILD_AND_RELEASE.md)
+
 | Module | Path | Job |
 |--------|------|-----|
 | board | `components/board` | Pin macros (LTE 16/17; MCP 21/22/23/20/14; SD 4/5/6/18) |
