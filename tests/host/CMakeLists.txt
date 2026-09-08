@@ -82,6 +82,76 @@ target_include_directories(test_fleet_zb_epan PRIVATE
 )
 add_test(NAME test_fleet_zb_epan COMMAND test_fleet_zb_epan)
 
+# --- fleet_protocol / host_registry: Zigbee host join + registry ---
+# host_registry.c only needs esp_timer.h behind #ifndef HOST_REGISTRY_HOST_TEST
+# (see the component source); its own telemetry_bus.h is already a
+# host-safe no-op stub, so no shim headers are needed here.
+add_executable(test_fleet_tlv_v2
+    test_fleet_tlv_v2.c
+    ${V2_MASTER}/components/fleet_protocol/fleet_tlv.c
+)
+target_include_directories(test_fleet_tlv_v2 PRIVATE
+    ${V2_MASTER}/components/fleet_protocol/include
+)
+add_test(NAME test_fleet_tlv_v2 COMMAND test_fleet_tlv_v2)
+
+add_executable(test_host_registry_v2
+    test_host_registry_v2.c
+    ${V2_MASTER}/components/fleet_protocol/fleet_tlv.c
+    ${V2_MASTER}/components/host_registry/host_registry.c
+    ${V2_MASTER}/components/host_registry/fleet_manifest_catalog.c
+)
+target_include_directories(test_host_registry_v2 PRIVATE
+    ${V2_MASTER}/components/fleet_protocol/include
+    ${V2_MASTER}/components/host_registry/include
+)
+target_compile_definitions(test_host_registry_v2 PRIVATE HOST_REGISTRY_HOST_TEST=1)
+add_test(NAME test_host_registry_v2 COMMAND test_host_registry_v2)
+
+add_executable(test_host_registry_capacity_v2
+    test_host_registry_capacity_v2.c
+    ${V2_MASTER}/components/fleet_protocol/fleet_tlv.c
+    ${V2_MASTER}/components/host_registry/host_registry.c
+    ${V2_MASTER}/components/host_registry/fleet_manifest_catalog.c
+)
+target_include_directories(test_host_registry_capacity_v2 PRIVATE
+    ${V2_MASTER}/components/fleet_protocol/include
+    ${V2_MASTER}/components/host_registry/include
+)
+target_compile_definitions(test_host_registry_capacity_v2 PRIVATE HOST_REGISTRY_HOST_TEST=1)
+add_test(NAME test_host_registry_capacity_v2 COMMAND test_host_registry_capacity_v2)
+
+# End-to-end: new device joins -> registry -> uplink batch (mirrors
+# collect_hosts() in components/uplink/uplink.c).
+add_executable(test_uplink_zigbee_join_v2
+    test_uplink_zigbee_join_v2.c
+    ${V2_MASTER}/components/fleet_protocol/fleet_tlv.c
+    ${V2_MASTER}/components/host_registry/host_registry.c
+    ${V2_MASTER}/components/host_registry/fleet_manifest_catalog.c
+    ${V2_MASTER}/components/uplink/uplink_host.c
+    ${V2_MASTER}/components/uplink/uplink_envelope.c
+    ${V2_MASTER}/components/uplink/uplink_batch.c
+)
+target_include_directories(test_uplink_zigbee_join_v2 PRIVATE
+    ${V2_MASTER}/components/fleet_protocol/include
+    ${V2_MASTER}/components/host_registry/include
+    ${V2_MASTER}/components/uplink/include
+)
+target_compile_definitions(test_uplink_zigbee_join_v2 PRIVATE HOST_REGISTRY_HOST_TEST=1)
+target_link_libraries(test_uplink_zigbee_join_v2 m)
+add_test(NAME test_uplink_zigbee_join_v2 COMMAND test_uplink_zigbee_join_v2)
+
+# Offline queue/batch capacity and memory-bound behavior.
+add_executable(test_uplink_offline_limits_v2
+    test_uplink_offline_limits_v2.c
+    ${V2_MASTER}/components/uplink/uplink_batch.c
+    ${V2_MASTER}/components/uplink/uplink_queue.c
+)
+target_include_directories(test_uplink_offline_limits_v2 PRIVATE
+    ${V2_MASTER}/components/uplink/include
+)
+add_test(NAME test_uplink_offline_limits_v2 COMMAND test_uplink_offline_limits_v2)
+
 # ota_parse.c has no ESP-IDF dependency (plain C + cJSON), but does need a
 # real cJSON to link against. Discovered portably so this runs both in CI
 # (apt install libcjson-dev on Ubuntu) and locally (e.g. brew install cjson
