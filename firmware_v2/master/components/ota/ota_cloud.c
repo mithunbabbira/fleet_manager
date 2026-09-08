@@ -375,18 +375,21 @@ esp_err_t ota_cloud_run(void)
     /*
      * OTA algorithm (LTE / Trafyn path):
      *
-     * 1) Strip running app version; POST firmware-check JSON to check URL.
+     * 1) Read running app version as-is; POST firmware-check JSON to check URL.
+     *    (No stripping: comparisons below use the full version string, so a
+     *    rebuild with only a different build-number suffix still counts as
+     *    a real mismatch/update — see components/ota/ota_parse.c.)
      * 2) Parse Trafyn envelope via ota_parse_check_json.
      * 3) FAIL / NO_UPDATE → set phase and return.
      * 4) UPDATE: skip if !force and latestVersion == ota_applied; else
      *    ota_flash_begin → stream presigned URL → save_applied → reboot.
      */
-    char stripped[24];
+    char current_ver[32];
     const esp_app_desc_t *app = esp_app_get_description();
-    ota_strip_version(app && app->version[0] ? app->version : "", stripped, sizeof(stripped));
+    snprintf(current_ver, sizeof(current_ver), "%s", app && app->version[0] ? app->version : "");
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    snprintf(s_st.current_version, sizeof(s_st.current_version), "%s", stripped);
+    snprintf(s_st.current_version, sizeof(s_st.current_version), "%s", current_ver);
     xSemaphoreGive(s_mu);
 
     cJSON *body = cJSON_CreateObject();
@@ -407,7 +410,7 @@ esp_err_t ota_cloud_run(void)
     cJSON_AddStringToObject(input, "deviceId", cfg.device_id);
     cJSON_AddStringToObject(input, "manufacturer", CONFIG_OTA_CLOUD_MANUFACTURER);
     cJSON_AddStringToObject(input, "deviceType", CONFIG_OTA_CLOUD_DEVICE_TYPE);
-    cJSON_AddStringToObject(input, "currentVersion", stripped[0] ? stripped : "0.0.0");
+    cJSON_AddStringToObject(input, "currentVersion", current_ver[0] ? current_ver : "0.0.0");
     char *payload = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
     if (!payload) {
@@ -432,7 +435,7 @@ esp_err_t ota_cloud_run(void)
     }
 
     ESP_LOGI(TAG, "firmware-check POST: %s (currentVersion=%s)", cfg.manifest_url,
-             stripped[0] ? stripped : "0.0.0");
+             current_ver[0] ? current_ver : "0.0.0");
 
     lte_http_result_t hr;
     memset(&hr, 0, sizeof(hr));
@@ -455,7 +458,7 @@ esp_err_t ota_cloud_run(void)
 
     ota_check_result_t parsed;
     memset(&parsed, 0, sizeof(parsed));
-    if (ota_parse_check_json(resp, stripped, &parsed) != 0) {
+    if (ota_parse_check_json(resp, current_ver, &parsed) != 0) {
         free(resp);
         xSemaphoreTake(s_mu, portMAX_DELAY);
         set_phase(OTA_CLOUD_FAILED, "parse_error");

@@ -106,7 +106,7 @@ definitions:
         # dependency, so it doesn't need the (much heavier) IDF image.
         image: ubuntu:22.04
         script:
-          - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake build-essential
+          - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cmake build-essential libcjson-dev
           - cmake -S tests/host -B tests/host/build
           - cmake --build tests/host/build
           - ctest --test-dir tests/host/build --output-on-failure

@@ -5,30 +5,6 @@
 #include <ctype.h>
 #include <string.h>
 
-/**
- * @brief Strip first "-suffix" from version for Trafyn currentVersion compare.
- * @note Only first dash; "1.0.4-rc.1" → "1.0.4".
- */
-void ota_strip_version(const char *in, char *out, size_t out_len)
-{
-    if (!in || !out || out_len == 0) {
-        return;
-    }
-
-    const char *dash = strchr(in, '-');
-    if (dash && dash > in) {
-        size_t prefix_len = (size_t)(dash - in);
-        if (prefix_len >= out_len) {
-            prefix_len = out_len - 1;
-        }
-        memcpy(out, in, prefix_len);
-        out[prefix_len] = '\0';
-    } else {
-        strncpy(out, in, out_len - 1);
-        out[out_len - 1] = '\0';
-    }
-}
-
 /** @brief True if exactly 64 hex chars. */
 static bool sha256_valid(const char *s)
 {
@@ -56,10 +32,11 @@ static void set_fail(ota_check_result_t *out, const char *msg)
 
 /**
  * @brief Parse Trafyn check JSON → UPDATE / NO_UPDATE / FAIL.
- * @param stripped_current Must be non-NULL (else UB on strcmp).
+ * @param current_version Full, unmodified running app version; must be
+ *        non-NULL (else UB on strcmp).
  * @note UPDATE needs updateAvailable, version≠current, URL, 64-hex sha256, size>0.
  */
-int ota_parse_check_json(const char *json, const char *stripped_current,
+int ota_parse_check_json(const char *json, const char *current_version,
                             ota_check_result_t *out)
 {
     if (!json || !out) {
@@ -116,7 +93,7 @@ int ota_parse_check_json(const char *json, const char *stripped_current,
 
     out->update_available = update_available;
 
-    if (!update_available || strcmp(latest_version, stripped_current) == 0 ||
+    if (!update_available || strcmp(latest_version, current_version) == 0 ||
         presigned_url[0] == '\0') {
         out->kind = OTA_CHECK_NO_UPDATE;
         strncpy(out->latest_version, latest_version, sizeof(out->latest_version) - 1);

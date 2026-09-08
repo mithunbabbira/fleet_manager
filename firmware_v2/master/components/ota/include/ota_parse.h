@@ -20,15 +20,12 @@ typedef struct {
 } ota_check_result_t;
 
 /**
- * @brief Strip first "-suffix" from version for Trafyn currentVersion compare.
- * @note Only first dash; "1.0.4-rc.1" → "1.0.4".
- */
-void ota_strip_version(const char *in, char *out, size_t out_len);
-
-/**
  * @brief Parse Trafyn check JSON → UPDATE / NO_UPDATE / FAIL.
- * @param stripped_current Must be non-NULL (else UB on strcmp).
+ * @param current_version Full, unmodified running app version; must be
+ *        non-NULL (else UB on strcmp). Compared as-is against the response's
+ *        raw latestVersion — any difference at all counts as a mismatch, so
+ *        a rebuild with a different build-number suffix is always an update.
  * @note UPDATE needs updateAvailable, version≠current, URL, 64-hex sha256, size>0.
  */
-int ota_parse_check_json(const char *json, const char *stripped_current,
+int ota_parse_check_json(const char *json, const char *current_version,
                             ota_check_result_t *out);

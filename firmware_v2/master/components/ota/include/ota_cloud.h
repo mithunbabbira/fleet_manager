@@ -32,7 +32,7 @@ typedef struct {
     char error[96];
     char manifest_version[40]; /* latestVersion from check response */
     char applied_version[40];
-    char current_version[24];  /* stripped value sent in POST */
+    char current_version[32];  /* raw esp_app_desc_t.version sent in POST, unmodified */
     bool update_available;
     int http_status;
     size_t bytes_downloaded;
