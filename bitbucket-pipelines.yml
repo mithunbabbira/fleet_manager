@@ -15,14 +15,19 @@
 # is installed at runtime there. Host unit tests don't need the ESP-IDF
 # toolchain at all, so that step just runs on plain Ubuntu instead.
 #
-# Two flows:
-#   - dev: builds its own binary every time (tagged "<VERSION>-dev.<build#>")
-#     and publishes it. Independent from staging/prod.
-#   - staging + prod: compiled ONCE per pipeline run (tagged
+# Branch triggers — only these two branches auto-run anything:
+#   - dev-main -> the development branch. Builds its own binary every push
+#     (tagged "<VERSION>-dev.<build#>") and publishes it as environment=dev.
+#   - main     -> the release branch. Compiled ONCE per pipeline run (tagged
 #     "<VERSION>-rel.<build#>"), published under environment=staging, then
 #     the exact same dist/ artifact — not a rebuild — is published again
 #     under environment=prod behind a manual approval gate. This guarantees
 #     staging and prod ship byte-identical binaries.
+# Both flows are also runnable on demand as custom pipelines (still named
+# "dev" / "staging" below) regardless of which branch is checked out. There
+# is no standalone "build prod" pipeline — prod only ever receives a
+# promoted release build, never its own compile. Any other branch falls
+# through to `default`: build + host tests only, no publish.
 #
 # Publishing (tools/ci/publish_firmware.sh) POSTs the built .bin to Trafyn's
 # publish-device-firmware workflow — that's the only distribution path;
@@ -38,16 +43,6 @@
 # Scoping them per-environment lets dev/staging/prod use different Trafyn
 # credentials if you ever want that, and gives you a Deployments dashboard
 # showing which version is live in each environment.
-#
-# Triggers:
-#   - dev branch     -> auto-builds and publishes as environment=dev
-#   - staging branch -> auto-builds, publishes as environment=staging,
-#                        then pauses on a manual step ("Publish to Trafyn
-#                        (prod)") that publishes that same build again as
-#                        environment=prod
-# Both are also runnable on demand as custom pipelines regardless of branch.
-# There is no standalone "build prod" pipeline — prod only ever receives a
-# promoted staging build, never its own compile.
 #
 # Each flow runs the tests/host ctest suite as its first step; the
 # build/publish steps never run if any test fails.
@@ -117,14 +112,11 @@ pipelines:
     - step: *build-generic
 
   branches:
-    main:
-      - step: *host-tests
-      - step: *build-generic
-    dev:
+    dev-main:
       - step: *host-tests
       - step: *build-dev
       - step: *publish-dev
-    staging:
+    main:
       - step: *host-tests
       - step: *build-release
       - step: *publish-staging
