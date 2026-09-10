@@ -64,6 +64,26 @@ int main(void)
     assert(r.kind == FW_OTA_CHECK_FAIL);
     assert(strcmp(r.error, "missing_sha_size") == 0);
 
+    /* CI stamps: strip latest before compare (1.0.34-dev.23 → 1.0.34). */
+    const char *ci_newer =
+        "{\"success\":true,\"data\":{\"latestVersion\":\"1.0.34-dev.23\","
+        "\"presignedUrl\":\"https://s3.example/fw.bin\",\"updateAvailable\":true,"
+        "\"sha256\":\"0036d69f1fb6060c9a495454c05f3485ee7047dedbd145521d296e20e0456a3a\","
+        "\"size\":870960}}";
+    assert(fw_ota_parse_check_json(ci_newer, "1.0.33", &r) == 0);
+    assert(r.kind == FW_OTA_CHECK_UPDATE);
+    assert(strcmp(r.latest_version, "1.0.34-dev.23") == 0);
+    assert(r.size == 870960);
+
+    const char *ci_same_base =
+        "{\"success\":true,\"data\":{\"latestVersion\":\"1.0.34-dev.23\","
+        "\"presignedUrl\":\"https://s3.example/fw.bin\",\"updateAvailable\":true,"
+        "\"sha256\":\"0036d69f1fb6060c9a495454c05f3485ee7047dedbd145521d296e20e0456a3a\","
+        "\"size\":870960}}";
+    assert(fw_ota_parse_check_json(ci_same_base, "1.0.34", &r) == 0);
+    assert(r.kind == FW_OTA_CHECK_NO_UPDATE);
+    assert(strcmp(r.latest_version, "1.0.34-dev.23") == 0);
+
     printf("test_fw_ota_lte_parse: ok\n");
     return 0;
 }

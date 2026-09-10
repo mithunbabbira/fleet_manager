@@ -28,7 +28,8 @@ void ota_strip_version(const char *in, char *out, size_t out_len);
 /**
  * @brief Parse Trafyn check JSON → UPDATE / NO_UPDATE / FAIL.
  * @param stripped_current Must be non-NULL (else UB on strcmp).
- * @note UPDATE needs updateAvailable, version≠current, URL, 64-hex sha256, size>0.
+ * @note UPDATE needs updateAvailable, stripped(latest)≠stripped current, URL,
+ *       64-hex sha256, size>0. Keeps full latestVersion in the result for NVS.
  */
 int ota_parse_check_json(const char *json, const char *stripped_current,
                             ota_check_result_t *out);

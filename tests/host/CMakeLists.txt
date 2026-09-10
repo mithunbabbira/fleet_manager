@@ -50,8 +50,18 @@ if(DEFINED ENV{IDF_PATH} AND EXISTS "${CJSON_SRC}")
         ${CMAKE_SOURCE_DIR}/../../components/fw_ota_lte/include
         $ENV{IDF_PATH}/components/json/cJSON
     )
+
+    add_executable(test_ota_parse_v2
+        test_ota_parse_v2.c
+        ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/ota/ota_parse.c
+        ${CJSON_SRC}
+    )
+    target_include_directories(test_ota_parse_v2 PRIVATE
+        ${CMAKE_SOURCE_DIR}/../../firmware_v2/master/components/ota/include
+        $ENV{IDF_PATH}/components/json/cJSON
+    )
 else()
-    message(WARNING "IDF_PATH not set — skipping test_fw_ota_lte_parse (needs cJSON). "
+    message(WARNING "IDF_PATH not set — skipping test_fw_ota_lte_parse / test_ota_parse_v2 (needs cJSON). "
                     "Run 'source ~/esp/esp-idf/export.sh' to include it.")
 endif()
 
@@ -62,6 +72,9 @@ add_test(NAME test_uplink_payload COMMAND test_uplink_payload)
 add_test(NAME test_obd_isotp COMMAND test_obd_isotp)
 if(TARGET test_fw_ota_lte_parse)
     add_test(NAME test_fw_ota_lte_parse COMMAND test_fw_ota_lte_parse)
+endif()
+if(TARGET test_ota_parse_v2)
+    add_test(NAME test_ota_parse_v2 COMMAND test_ota_parse_v2)
 endif()
 
 add_executable(test_fleet_tlv

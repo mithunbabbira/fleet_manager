@@ -57,7 +57,8 @@ static void set_fail(ota_check_result_t *out, const char *msg)
 /**
  * @brief Parse Trafyn check JSON → UPDATE / NO_UPDATE / FAIL.
  * @param stripped_current Must be non-NULL (else UB on strcmp).
- * @note UPDATE needs updateAvailable, version≠current, URL, 64-hex sha256, size>0.
+ * @note UPDATE needs updateAvailable, stripped latest≠stripped current, URL,
+ *       64-hex sha256, size>0. CI stamps like "1.0.34-dev.23" compare as "1.0.34".
  */
 int ota_parse_check_json(const char *json, const char *stripped_current,
                             ota_check_result_t *out)
@@ -116,7 +117,11 @@ int ota_parse_check_json(const char *json, const char *stripped_current,
 
     out->update_available = update_available;
 
-    if (!update_available || strcmp(latest_version, stripped_current) == 0 ||
+    /* Same strip rule as currentVersion (CI: "1.0.34-dev.23" → "1.0.34"). */
+    char latest_stripped[40];
+    ota_strip_version(latest_version, latest_stripped, sizeof(latest_stripped));
+
+    if (!update_available || strcmp(latest_stripped, stripped_current) == 0 ||
         presigned_url[0] == '\0') {
         out->kind = OTA_CHECK_NO_UPDATE;
         strncpy(out->latest_version, latest_version, sizeof(out->latest_version) - 1);
