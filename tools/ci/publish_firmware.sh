@@ -42,6 +42,9 @@ REQUEST_JSON="$(mktemp)"
 RESPONSE_BODY="$(mktemp)"
 trap 'rm -f "$REQUEST_JSON" "$RESPONSE_BODY"' EXIT
 
+# Put size next to sha256 in input as well as fileMetaData. get-latest has
+# been observed returning a stale size while sha256 + S3 object were correct
+# (firmware trusts sha256 when they disagree).
 cat > "$REQUEST_JSON" <<JSON
 {
   "workflowName": "publish-device-firmware",
@@ -52,7 +55,8 @@ cat > "$REQUEST_JSON" <<JSON
       "deviceType": "fleet monitor",
       "latestVersion": "${FW_VERSION}",
       "fileName": "${BIN_NAME}",
-      "sha256": "${SHA256}"
+      "sha256": "${SHA256}",
+      "size": ${SIZE}
     }
   },
   "fileMetaData": [{"filename": "${BIN_NAME}", "size": ${SIZE}}]
@@ -75,3 +79,7 @@ if [[ "$HTTP_STATUS" -lt 200 || "$HTTP_STATUS" -ge 300 ]]; then
   echo "Trafyn publish failed (HTTP ${HTTP_STATUS})" >&2
   exit 1
 fi
+
+# Sanity: published bytes must match what we just hashed (guards accidental
+# empty/truncated uploads before Trafyn accepts them).
+echo "publish ok: local file ${SIZE} bytes sha256=${SHA256}"

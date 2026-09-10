@@ -530,6 +530,11 @@ esp_err_t ota_cloud_run(void)
         xSemaphoreGive(s_mu);
 
         if (err == ESP_OK) {
+            if (clen > 0 && clen != parsed.size) {
+                ESP_LOGW(TAG,
+                         "Content-Length %u != manifest size %u (will trust sha256)",
+                         (unsigned)clen, (unsigned)parsed.size);
+            }
             break;
         }
 
@@ -561,9 +566,12 @@ esp_err_t ota_cloud_run(void)
     err = ota_flash_end_and_reboot();
     /* only on failure — drop pending so a rollback can redownload */
     (void)clear_pending_version();
+    ota_flash_status_t ost;
+    memset(&ost, 0, sizeof(ost));
+    (void)ota_flash_get_status(&ost);
     ota_flash_abort();
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    set_phase(OTA_CLOUD_FAILED, "end_reboot_fail");
+    set_phase(OTA_CLOUD_FAILED, ost.error[0] ? ost.error : "end_reboot_fail");
     xSemaphoreGive(s_mu);
     return err;
 }

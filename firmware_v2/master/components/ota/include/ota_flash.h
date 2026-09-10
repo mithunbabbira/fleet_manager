@@ -71,8 +71,9 @@ esp_err_t ota_flash_write(const void *data, size_t len);
 esp_err_t ota_flash_abort(void);
 
 /**
- * @brief Verify size+SHA-256, finalize OTA, set boot partition, then esp_restart().
- * @note Does not return on success. Size/hash mismatch aborts and returns an error.
+ * @brief Verify SHA-256 (and non-empty write), finalize OTA, set boot, reboot.
+ * @note Does not return on success. Hash mismatch aborts. Manifest size may
+ *       disagree with bytes written; matching sha256 still succeeds.
  * @return Error code on failure; ESP_OK only in the unreachable success path.
  */
 esp_err_t ota_flash_end_and_reboot(void);

@@ -297,7 +297,10 @@ esp_err_t ota_flash_abort(void)
 }
 
 /**
- * @brief Finalize write: exact size, SHA match, esp_ota_end, set boot, reboot.
+ * @brief Finalize write: SHA match (authoritative), esp_ota_end, set boot, reboot.
+ * @note Manifest `size` from Trafyn can be stale vs the S3 object; if the
+ *       streamed bytes hash to the published sha256 we accept the image even
+ *       when written != expected. Empty download always fails.
  * @note Success path calls esp_restart() and does not return; failures abort/return.
  */
 esp_err_t ota_flash_end_and_reboot(void)
@@ -311,7 +314,7 @@ esp_err_t ota_flash_end_and_reboot(void)
         xSemaphoreGive(s_mu);
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_written != s_expected) {
+    if (s_written == 0) {
         set_error("size_mismatch");
         s_state = OTA_FLASH_STATE_FAILED;
         xSemaphoreGive(s_mu);
@@ -325,11 +328,24 @@ esp_err_t ota_flash_end_and_reboot(void)
     s_sha_active = false;
 
     if (memcmp(got, s_expect_sha, SHA256_BIN_LEN) != 0) {
+        /* Prefer sha failure over size when both are wrong — content is bad. */
+        if (s_written != s_expected) {
+            ESP_LOGW(TAG, "size_mismatch written=%u expected=%u (and sha256 mismatch)",
+                     (unsigned)s_written, (unsigned)s_expected);
+        }
         set_error("sha256_mismatch");
         s_state = OTA_FLASH_STATE_FAILED;
         xSemaphoreGive(s_mu);
         ota_flash_abort();
         return ESP_ERR_INVALID_CRC;
+    }
+
+    if (s_written != s_expected) {
+        /* Trafyn get-latest has returned a stale size while sha/file were correct
+         * (lab: meta 870960 vs S3 Content-Length 870768, sha matched). */
+        ESP_LOGW(TAG,
+                 "manifest size %u != written %u but sha256 matches — accepting image",
+                 (unsigned)s_expected, (unsigned)s_written);
     }
 
     esp_err_t err = esp_ota_end(s_ota);
