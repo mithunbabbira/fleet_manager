@@ -1,0 +1,2 @@
+# DELETE ME — lab only. Desk MQTT publish helper (server.py needs stdlib only).
+paho-mqtt>=2.0.0
