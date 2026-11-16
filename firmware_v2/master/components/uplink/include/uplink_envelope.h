@@ -13,7 +13,7 @@ extern "C" {
 #define UPLINK_GPS_ONLY_MIN_MOVE_M 50.0
 #define UPLINK_GPS_ONLY_HEARTBEAT_MS 300000ULL
 
-/** Master device_id → {master}_GPS / node-{master}_GPS (derived; not OTA-writable). */
+/** Master device_id (MAC) → {master}_GPS for both GPS device_id and node_id. */
 void uplink_virtual_gps_ids(const char *carrier_device_id, char *gps_device_id, size_t gps_dev_len,
                             char *gps_node_id, size_t gps_node_len);
 

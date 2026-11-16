@@ -1,5 +1,6 @@
 #include "ota_cloud.h"
 
+#include "board_mac_id.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -110,7 +111,7 @@ static void apply_default_url(ota_cloud_config_t *c)
     }
 }
 
-/** @brief Defaults; device_id starts as fleet-demo-001 (override via USB). */
+/** @brief Defaults; device_id placeholder until MAC is applied in ota_cloud_init. */
 static void defaults(ota_cloud_config_t *c)
 {
     memset(c, 0, sizeof(*c));
@@ -273,6 +274,20 @@ esp_err_t ota_cloud_init(void)
         }
     }
     load_nvs();
+
+    /* Truck unique ID is the board MAC (no colons), not a friendly NVS name. */
+    char mac_id[16];
+    if (board_get_mac_id(mac_id, sizeof(mac_id)) == ESP_OK) {
+        if (strcmp(s_cfg.device_id, mac_id) != 0) {
+            ESP_LOGI(TAG, "device_id '%s' → MAC '%s'", s_cfg.device_id[0] ? s_cfg.device_id : "(empty)",
+                     mac_id);
+            snprintf(s_cfg.device_id, sizeof(s_cfg.device_id), "%s", mac_id);
+            (void)ota_cloud_set_config(&s_cfg);
+        }
+    } else {
+        ESP_LOGW(TAG, "board_get_mac_id failed — keeping device_id='%s'", s_cfg.device_id);
+    }
+
     /*
      * Drop orphaned ota_pend when this boot is not pending verify (rollback or
      * leftover). If we ARE pending verify, keep pend for commit after SoftAP.
@@ -288,8 +303,8 @@ esp_err_t ota_cloud_init(void)
     }
     memset(&s_st, 0, sizeof(s_st));
     set_phase(OTA_CLOUD_IDLE, NULL);
-    ESP_LOGI(TAG, "init url='%s' channel='%s' force=%d", s_cfg.manifest_url, s_cfg.channel,
-             (int)s_cfg.force);
+    ESP_LOGI(TAG, "init url='%s' channel='%s' force=%d device_id='%s'", s_cfg.manifest_url,
+             s_cfg.channel, (int)s_cfg.force, s_cfg.device_id);
     return ESP_OK;
 }
 

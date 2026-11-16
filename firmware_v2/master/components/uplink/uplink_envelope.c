@@ -7,14 +7,15 @@
 void uplink_virtual_gps_ids(const char *carrier_device_id, char *gps_device_id, size_t gps_dev_len,
                             char *gps_node_id, size_t gps_node_len)
 {
-    /* Derived only from provisioned master device_id (NVS/USB) — never from OTA. */
+    /* Derived from carrier device_id (board MAC, no colons) — never from OTA. */
     const char *master =
         (carrier_device_id != NULL && carrier_device_id[0] != '\0') ? carrier_device_id : "unknown";
     if (gps_device_id && gps_dev_len) {
         snprintf(gps_device_id, gps_dev_len, "%s_GPS", master);
     }
     if (gps_node_id && gps_node_len) {
-        snprintf(gps_node_id, gps_node_len, "node-%s_GPS", master);
+        /* Same MAC_GPS form as device_id (no node- prefix). */
+        snprintf(gps_node_id, gps_node_len, "%s_GPS", master);
     }
 }
 

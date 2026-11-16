@@ -1,5 +1,6 @@
 #include "uplink.h"
 
+#include "board_mac_id.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -434,6 +435,20 @@ esp_err_t uplink_init(void)
     snprintf(s_url, sizeof(s_url), "%s", CONFIG_UPLINK_URL);
     s_node_id[0] = '\0';
     load_nvs();
+
+    /* Match telemetry node_id to board MAC (same string as OTA/uplink device_id). */
+    char mac_id[16];
+    if (board_get_mac_id(mac_id, sizeof(mac_id)) == ESP_OK) {
+        if (strcmp(s_node_id, mac_id) != 0) {
+            ESP_LOGI(TAG, "node_id '%s' → MAC '%s'", s_node_id[0] ? s_node_id : "(empty)", mac_id);
+            snprintf(s_node_id, sizeof(s_node_id), "%s", mac_id);
+            (void)save_node_id();
+        }
+    } else {
+        ESP_LOGW(TAG, "board_get_mac_id failed — keeping node_id='%s'",
+                 s_node_id[0] ? s_node_id : "(empty)");
+    }
+
     ESP_LOGI(TAG, "init url='%s' node_id='%s'", s_url, s_node_id[0] ? s_node_id : "(empty)");
     return ESP_OK;
 }

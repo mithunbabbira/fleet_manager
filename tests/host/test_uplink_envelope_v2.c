@@ -10,7 +10,7 @@ int main(void)
     char did[40], nid[40];
     uplink_virtual_gps_ids("fleet-demo-001", did, sizeof(did), nid, sizeof(nid));
     assert(strcmp(did, "fleet-demo-001_GPS") == 0);
-    assert(strcmp(nid, "node-fleet-demo-001_GPS") == 0);
+    assert(strcmp(nid, "fleet-demo-001_GPS") == 0);
 
     char payload[128];
     assert(uplink_build_gps_payload(true, 12.9716, 77.5946, payload, sizeof(payload)) > 0);
